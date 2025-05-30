@@ -26,8 +26,7 @@ RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Download cookies from GCS
-RUN ./download_cookies.sh
-
+RUN chmod +x download_cookies.sh && ./download_cookies.sh
 # Expose port
 EXPOSE 8080
 
