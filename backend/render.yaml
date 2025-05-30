@@ -5,13 +5,12 @@ services:
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
+    healthCheckPath: /test
     envVars:
       - key: FLASK_ENV
         value: production
       - key: FLASK_HOST
         value: 0.0.0.0
-      - key: FLASK_PORT
-        value: 10000
       - key: FLASK_DEBUG
         value: false
       - key: PYTHON_VERSION
