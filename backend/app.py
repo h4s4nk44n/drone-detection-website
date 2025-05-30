@@ -18,7 +18,7 @@ import logging
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=["https://drone-detection-website.vercel.app"])
 
 # Disable all debug features
 app.config['DEBUG'] = False
