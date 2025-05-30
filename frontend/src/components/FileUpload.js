@@ -20,7 +20,7 @@ const FileUpload = () => {
         const testServer = async () => {
             try {
                 console.log('🔄 Testing server connection...');
-                const response = await fetch('http://localhost:5001/test', {
+                const response = await fetch('https://drone-detection-website.onrender.com/test', {
                     method: 'GET',
                     mode: 'cors',
                     headers: {
@@ -126,7 +126,7 @@ const FileUpload = () => {
         try {
             console.log('📤 Sending file to server...');
             
-            const response = await fetch('http://localhost:5001/api/upload', {
+            const response = await fetch('https://drone-detection-website.onrender.com/api/upload', {
                 method: 'POST',
                 body: formData,
                 signal: AbortSignal.timeout(600000) // 10 minutes timeout
@@ -173,7 +173,7 @@ const FileUpload = () => {
         try {
             console.log('📤 Sending YouTube URL to server...');
             
-            const response = await fetch('http://localhost:5001/api/youtube', {
+            const response = await fetch('https://drone-detection-website.onrender.com/api/youtube', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -212,7 +212,7 @@ const FileUpload = () => {
         if (!currentSessionId) return;
         
         try {
-            const response = await fetch(`http://localhost:5001/api/cleanup/${currentSessionId}`, {
+            const response = await fetch(`https://drone-detection-website.onrender.com/api/cleanup/${currentSessionId}`, {
                 method: 'POST'
             });
             
