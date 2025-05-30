@@ -1,28 +1,35 @@
-# Use a lightweight Python image
-FROM python:3.10-slim
+FROM python:3.11-slim
 
-# Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    ffmpeg \
+    libgl1 \
+    curl \
+    gnupg \
+    && apt-get clean
+
+# Install Google Cloud SDK
+RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" \
+    > /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - && \
+    apt-get update && apt-get install -y google-cloud-sdk
 
 # Set working directory
 WORKDIR /app
 
-# Copy everything
+# Copy files
 COPY . .
 
-# Install system dependencies for OpenCV, PyTorch
-RUN apt-get update && apt-get install -y \
-    libglib2.0-0 libsm6 libxext6 libxrender-dev libgl1-mesa-glx \
-    && rm -rf /var/lib/apt/lists/*
-
 # Install Python dependencies
-RUN pip install --no-cache-dir --upgrade pip
+RUN pip install --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Set the port for Cloud Run
-ENV PORT=8080
+# Download cookies from GCS
+RUN ./download_cookies.sh
+
+# Expose port
 EXPOSE 8080
 
-# Run the Flask app using Gunicorn
+# Run the app
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "wsgi:app"]

@@ -470,6 +470,7 @@ def process_youtube_video(youtube_url, model):
             'embed_subs': False,
             'writesubtitles': False,
             'writeautomaticsub': False,
+            'cookiefile': os.path.join(os.path.dirname(__file__), 'cookies.txt'),
         }
         
         print("📥 Downloading YouTube video...")
