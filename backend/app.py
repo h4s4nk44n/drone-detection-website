@@ -11,6 +11,11 @@ import numpy as np
 from io import BytesIO
 import yt_dlp
 import re
+from dotenv import load_dotenv
+import logging
+
+# Load environment variables
+load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -155,15 +160,23 @@ def process_youtube():
         return jsonify({"error": f"YouTube processing failed: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    print("🚀 Starting Flask server in PRODUCTION mode...")
+    # Get port from environment (Render sets PORT automatically)
+    port = int(os.environ.get('PORT', os.getenv('FLASK_PORT', 5001)))
+    host = os.getenv('FLASK_HOST', '0.0.0.0')  # Important: use 0.0.0.0 for Render
+    
+    print("🚀 Starting Flask server...")
+    print(f"📍 Host: {host}")
+    print(f"🔌 Port: {port}")
+    print(f"🔧 Debug mode: {app.config['DEBUG']}")
+    print(f"📁 Model path: {model_path}")
+    print(f"📏 Max file size: {100 * 1024 * 1024 / (1024*1024):.0f}MB")
     print("💾 Processing files in memory only - no disk storage!")
     print("🔗 YouTube video processing enabled!")
-    print("⚠️ Debug mode is DISABLED to prevent restarts during processing")
     
     app.run(
-        host='localhost', 
-        port=5001, 
-        debug=False,
+        host=host,
+        port=port,
+        debug=app.config['DEBUG'],
         use_reloader=False,
         threaded=True
     )
