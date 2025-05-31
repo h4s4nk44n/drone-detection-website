@@ -284,45 +284,56 @@ def process_video_in_memory(file_data, model):
     try:
         print("🎬 Starting in-memory video processing...")
         
-        # Create temporary files for video processing (OpenCV requirement)
-        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input:
-            temp_input.write(file_data)
-            temp_input_path = temp_input.name
+        # Check available memory before starting
+        import psutil
+        available_memory = psutil.virtual_memory().available / (1024 * 1024)
+        print(f"🧠 Available memory: {available_memory:.1f} MB")
         
-        # Create temp output file
-        temp_output_path = tempfile.mktemp(suffix='.webm')
+        if available_memory < 1000:  # Less than 1GB available
+            raise Exception("Insufficient memory available for video processing")
         
-        try:
-            # Process video using temporary files
-            process_video_with_temp_files(temp_input_path, temp_output_path, model)
-            
-            # Read original file back to base64
-            original_base64 = base64.b64encode(file_data).decode('utf-8')
-            
-            # Read processed video to base64
-            with open(temp_output_path, 'rb') as f:
-                processed_data = f.read()
-            processed_base64 = base64.b64encode(processed_data).decode('utf-8')
-            
-            print("✅ Video processing complete")
-            return original_base64, processed_base64, 'video/webm'
-            
-        finally:
-            # Always clean up temporary files
-            if os.path.exists(temp_input_path):
-                os.unlink(temp_input_path)
-            if os.path.exists(temp_output_path):
-                os.unlink(temp_output_path)
-            print("🧹 Temporary files cleaned up")
-            
+        # Create temporary files
+        with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_input_file:
+            temp_input_file.write(file_data)
+            temp_input_path = temp_input_file.name
+            temp_input = temp_input_path
+        
+        # Create output temp file with MP4 extension to avoid codec issues
+        temp_output_path = tempfile.mktemp(suffix='.mp4')
+        temp_output = temp_output_path
+        
+        print(f"📁 Created temp input: {temp_input_path}")
+        print(f"📁 Created temp output: {temp_output_path}")
+        
+        # Process the video
+        actual_output_path = process_video_with_temp_files(temp_input_path, temp_output_path, model)
+        
+        # Read the processed video back into memory
+        with open(actual_output_path, 'rb') as f:
+            processed_video_data = f.read()
+        
+        # Convert to base64
+        original_base64 = base64.b64encode(file_data).decode('utf-8')
+        processed_base64 = base64.b64encode(processed_video_data).decode('utf-8')
+        
+        print(f"✅ Video processing completed successfully")
+        print(f"📊 Original size: {len(file_data) / (1024*1024):.2f} MB")
+        print(f"📊 Processed size: {len(processed_video_data) / (1024*1024):.2f} MB")
+        
+        return original_base64, processed_base64, 'video/mp4'
+        
     except Exception as e:
-        print(f"❌ Error processing video: {str(e)}")
-        # Clean up on error
-        if temp_input and os.path.exists(temp_input.name):
-            os.unlink(temp_input.name)
+        print(f"❌ Error in process_video_in_memory: {str(e)}")
+        raise e
+    finally:
+        # Clean up temporary files
+        print("🧹 Cleaning up temporary files...")
+        if temp_input and os.path.exists(temp_input):
+            os.unlink(temp_input)
+            print(f"🧹 Removed temp input: {temp_input}")
         if temp_output and os.path.exists(temp_output):
             os.unlink(temp_output)
-        raise e
+            print(f"🧹 Removed temp output: {temp_output}")
 
 def process_video_with_temp_files(input_path, output_path, model):
     """
@@ -362,13 +373,46 @@ def process_video_with_temp_files(input_path, output_path, model):
     print(f"   - FPS: {fps}")
     print(f"   - Total frames: {total_frames}")
     
-    # Use more efficient codec
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # Fix: Use correct codec based on output file extension
+    output_ext = os.path.splitext(output_path)[1].lower()
+    print(f"🎬 Output file extension: {output_ext}")
+    
+    if output_ext == '.mp4':
+        # For MP4 files, use H.264 codec
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        print("🎬 Using mp4v codec for MP4 output")
+    elif output_ext == '.webm':
+        # For WebM files, use VP8 codec
+        fourcc = cv2.VideoWriter_fourcc(*'VP80')
+        print("🎬 Using VP80 codec for WebM output")
+    else:
+        # Default to MP4 format and change extension
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        output_path = os.path.splitext(output_path)[0] + '.mp4'
+        print(f"🎬 Changed output to MP4 format: {output_path}")
+    
+    # Create video writer with error checking
+    print(f"🎬 Creating video writer: {output_path}")
     out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
     
     if not out.isOpened():
         cap.release()
-        raise Exception(f"Could not create output video writer")
+        # Try alternative codec
+        print("⚠️ First codec failed, trying alternative...")
+        if output_ext == '.mp4':
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            print("🎬 Trying XVID codec")
+        else:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            output_path = os.path.splitext(output_path)[0] + '.mp4'
+            print(f"🎬 Falling back to MP4: {output_path}")
+        
+        out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+        
+        if not out.isOpened():
+            raise Exception(f"Could not create output video writer with any codec. Output path: {output_path}")
+    
+    print("✅ Video writer created successfully")
     
     frame_count = 0
     successful_frames = 0
@@ -466,7 +510,10 @@ def process_video_with_temp_files(input_path, output_path, model):
         raise Exception("Output video file is too small, likely empty")
     
     print(f"📊 Output video created: {file_size / (1024*1024):.2f} MB")
-
+    
+    # Return the actual output path (in case it was changed)
+    return output_path
+    
 def process_youtube_video(youtube_url, model):
     """
     Download and process YouTube video entirely in memory
