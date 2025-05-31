@@ -9,6 +9,8 @@ import numpy as np
 import yt_dlp
 import subprocess
 
+YOLO_PROCESSING_SIZE = 832  # High accuracy processing for all media
+
 def process_file(file_path, model, session_id=None):
     """
     Process an image or video file with YOLO model
@@ -266,10 +268,10 @@ def process_file_in_memory(file_data, file_ext, filename, model):
                     processed_image = image
                     print("🔍 ONNX found no objects")
             else:
-                # PyTorch model
-                results = model.predict(image, verbose=False, conf=0.3)
+                # PyTorch model (fallback)
+                print("🤖 Using PyTorch model for inference...")
+                results = model.predict(image, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
                 processed_image = results[0].plot()
-                print(f"🎯 PyTorch processed image")
             
             # Convert to bytes
             _, buffer = cv2.imencode('.jpg', image)
@@ -314,7 +316,7 @@ def process_image_in_memory(file_data, model):
     else:
         # PyTorch model (fallback)
         print("🤖 Using PyTorch model for inference...")
-        results = model.predict(image, verbose=False, conf=0.3, imgsz=832)
+        results = model.predict(image, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
         processed_image = results[0].plot()
     
     # Convert both images to base64
@@ -406,7 +408,7 @@ def process_video_with_temp_files(input_path, output_path, model):
     duration_seconds = total_frames / original_fps
     
     # Reasonable size reduction
-    max_dimension = 480
+    max_dimension = 720
     if width > height:
         output_width = max_dimension
         output_height = int(height * (max_dimension / width))
@@ -419,7 +421,7 @@ def process_video_with_temp_files(input_path, output_path, model):
     output_height = output_height - (output_height % 2)
     
     # Keep reasonable FPS
-    output_fps = min(15, original_fps)
+    output_fps = min(30, original_fps)
     
     print(f"📊 Processing plan:")
     print(f"   - Input: {width}x{height} @ {original_fps} fps")
@@ -517,7 +519,7 @@ def process_video_with_temp_files(input_path, output_path, model):
                         ai_processed += 1
                     else:
                         # PyTorch model
-                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=320)
+                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
                         processed_frame = results[0].plot()
                         ai_processed += 1
                     
@@ -629,7 +631,7 @@ def process_video_with_ffmpeg(input_path, output_path, model):
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         
         # Target resolution
-        max_dimension = 480
+        max_dimension = 720
         if width > height:
             output_width = max_dimension
             output_height = int(height * (max_dimension / width))
@@ -641,7 +643,7 @@ def process_video_with_ffmpeg(input_path, output_path, model):
         output_width = output_width - (output_width % 2)
         output_height = output_height - (output_height % 2)
         
-        output_fps = min(15, fps)
+        output_fps = min(30, fps)
         frame_skip = max(1, fps // output_fps)
         
         print(f"📊 FFmpeg processing plan:")
@@ -678,7 +680,7 @@ def process_video_with_ffmpeg(input_path, output_path, model):
                             processed_frame = frame_resized
                     else:
                         # PyTorch model
-                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=320)
+                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
                         processed_frame = results[0].plot()
                     
                     # Save frame as image

@@ -80,35 +80,37 @@ print("✅ YOLO model loaded successfully")
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     try:
-        print("📤 Upload request received")
-        
         if 'file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
-            
+            return jsonify({"error": "No file uploaded"}), 400
+        
         file = request.files['file']
         if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
+            return jsonify({"error": "No file selected"}), 400
         
-        print(f"📁 Processing file: {file.filename}")
-        
-        # Read file directly into memory
+        # Read file data
         file_data = file.read()
-        file_size = len(file_data)
-        print(f"📊 File size: {file_size / (1024*1024):.2f} MB")
+        file_size_mb = len(file_data) / (1024 * 1024)
         
-        # Check file size limit - reduce for videos
-        max_size = 50 * 1024 * 1024 if file.filename.lower().endswith('.mp4') else 100 * 1024 * 1024
-        if file_size > max_size:
-            return jsonify({"error": f"File too large. Maximum size is {max_size/(1024*1024):.0f}MB for videos."}), 400
+        # Updated file size limit: 75MB
+        MAX_FILE_SIZE_MB = 75
+        if file_size_mb > MAX_FILE_SIZE_MB:
+            return jsonify({"error": f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."}), 400
+        
+        print(f"📁 File uploaded: {file.filename} ({file_size_mb:.2f}MB)")
         
         # Get file extension
         file_ext = os.path.splitext(file.filename)[1].lower()
         
+        # Validate file type
+        allowed_extensions = {'.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.webm'}
+        if file_ext not in allowed_extensions:
+            return jsonify({"error": f"Unsupported file type: {file_ext}"}), 400
+        
         # For videos, add early validation
-        if file_ext == '.mp4':
+        if file_ext in ['.mp4', '.avi', '.mov', '.webm']:
             # Quick video duration check using OpenCV
             import tempfile
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+            with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_file:
                 temp_file.write(file_data)
                 temp_path = temp_file.name
             
@@ -120,14 +122,15 @@ def upload_file():
                     duration = frame_count / fps if fps > 0 else 0
                     cap.release()
                     
-                    # Limit video duration to 30 seconds for Cloud Run
+                    # Duration limit: 120 seconds
                     if duration > 120:
                         print(f"❌ Video too long: {duration}s > 120s")
                         if temp_path and os.path.exists(temp_path):
                             os.unlink(temp_path)
                         return jsonify({"error": "Video too long. Maximum duration is 120 seconds."}), 400
                     
-                    print(f"📹 Video duration: {duration:.1f}s")
+                    print(f"📹 Video duration: {duration:.1f}s - ✅ Within 120s limit")
+                    print(f"📊 File size: {file_size_mb:.2f}MB - ✅ Within 75MB limit")
                 else:
                     os.unlink(temp_path)
                     return jsonify({"error": "Invalid video file"}), 400
