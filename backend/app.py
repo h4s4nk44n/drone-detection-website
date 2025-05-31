@@ -60,6 +60,7 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'false')
     return response
 
 @app.route('/', methods=['GET'])
@@ -121,10 +122,10 @@ def upload_file():
                     
                     # Limit video duration to 30 seconds for Cloud Run
                     if duration > 30:
-                        print(f"❌ Video too long: {duration}s > 30s")
+                        print(f"❌ Video too long: {duration}s > 120s")
                         if temp_path and os.path.exists(temp_path):
                             os.unlink(temp_path)
-                        return jsonify({"error": "Video too long. Maximum duration is 30 seconds."}), 400
+                        return jsonify({"error": "Video too long. Maximum duration is 120 seconds."}), 400
                     
                     print(f"📹 Video duration: {duration:.1f}s")
                 else:
