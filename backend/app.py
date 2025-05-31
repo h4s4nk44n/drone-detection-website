@@ -121,7 +121,7 @@ def upload_file():
                     cap.release()
                     
                     # Limit video duration to 30 seconds for Cloud Run
-                    if duration > 30:
+                    if duration > 120:
                         print(f"❌ Video too long: {duration}s > 120s")
                         if temp_path and os.path.exists(temp_path):
                             os.unlink(temp_path)
