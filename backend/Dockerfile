@@ -30,5 +30,5 @@ RUN chmod +x download_cookies.sh && ./download_cookies.sh
 # Expose port
 EXPOSE 8080
 
-# Run the app
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "wsgi:app"]
+# Use the timeout-configured gunicorn
+CMD ["gunicorn", "--config", "gunicorn_config.py", "app:app"]
