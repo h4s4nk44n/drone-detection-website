@@ -216,7 +216,7 @@ def process_file_in_memory(file_data, file_ext, filename, model):
         if file_ext in ['.jpg', '.jpeg', '.png', '.webp']:
             # Process image in memory
             print("🖼️ Processing image in memory...")
-            return process_image_in_memory(file_data, file_ext, model)
+            return process_image_in_memory(file_data, model)
             
         elif file_ext == '.mp4':
             # Process video in memory
@@ -229,50 +229,40 @@ def process_file_in_memory(file_data, file_ext, filename, model):
         print(f"❌ Error in process_file_in_memory: {str(e)}")
         raise e
 
-def process_image_in_memory(file_data, file_ext, model):
-    """
-    Process image entirely in memory
-    """
-    try:
-        # Convert bytes to numpy array
-        nparr = np.frombuffer(file_data, np.uint8)
-        
-        # Decode image
-        original_img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-        if original_img is None:
-            raise Exception("Could not decode image")
-        
-        print(f"📊 Image shape: {original_img.shape}")
-        
-        # Run YOLO prediction
-        results = model.predict(original_img, verbose=False)
-        
-        # Get annotated image
-        annotated_img = results[0].plot()
-        
-        # Encode original image to base64
-        original_base64 = base64.b64encode(file_data).decode('utf-8')
-        
-        # Encode processed image to base64
-        success, processed_buffer = cv2.imencode(file_ext, annotated_img)
-        if not success:
-            raise Exception("Could not encode processed image")
-        
-        processed_base64 = base64.b64encode(processed_buffer).decode('utf-8')
-        
-        # Determine MIME type
-        mime_types = {
-            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-            '.png': 'image/png', '.webp': 'image/webp'
-        }
-        mime_type = mime_types.get(file_ext, 'image/jpeg')
-        
-        print("✅ Image processing complete")
-        return original_base64, processed_base64, mime_type
-        
-    except Exception as e:
-        print(f"❌ Error processing image: {str(e)}")
-        raise e
+def process_image_in_memory(file_data, model):
+    """Process image entirely in memory using ONNX or PyTorch model"""
+    print("🖼️ Processing image in memory...")
+    
+    # Convert bytes to numpy array
+    nparr = np.frombuffer(file_data, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    
+    if image is None:
+        raise Exception("Could not decode image")
+    
+    print(f"📊 Image shape: {image.shape}")
+    
+    # Check if using ONNX model
+    if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
+        # ONNX model
+        print("🤖 Using ONNX model for inference...")
+        detections = model.predict(image)
+        processed_image = model.draw_detections(image, detections)
+        print(f"🎯 Found {len(detections)} detections")
+    else:
+        # PyTorch model (fallback)
+        print("🤖 Using PyTorch model for inference...")
+        results = model.predict(image, verbose=False, conf=0.3, imgsz=832)
+        processed_image = results[0].plot()
+    
+    # Convert both images to base64
+    _, original_buffer = cv2.imencode('.jpg', image)
+    _, processed_buffer = cv2.imencode('.jpg', processed_image)
+    
+    original_base64 = base64.b64encode(original_buffer).decode('utf-8')
+    processed_base64 = base64.b64encode(processed_buffer).decode('utf-8')
+    
+    return original_base64, processed_base64, 'image/jpeg'
 
 def process_video_in_memory(file_data, model):
     """
@@ -337,7 +327,7 @@ def process_video_in_memory(file_data, model):
 
 def process_video_with_temp_files(input_path, output_path, model):
     """
-    Process video frame by frame using temporary files - optimized for low memory
+    Process video frame by frame - optimized for web playback
     """
     print(f"🎬 Processing video with temp files...")
     
@@ -373,53 +363,36 @@ def process_video_with_temp_files(input_path, output_path, model):
     print(f"   - FPS: {fps}")
     print(f"   - Total frames: {total_frames}")
     
-    # Fix: Use correct codec based on output file extension
-    output_ext = os.path.splitext(output_path)[1].lower()
-    print(f"🎬 Output file extension: {output_ext}")
-    
-    if output_ext == '.mp4':
-        # For MP4 files, use H.264 codec
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        print("🎬 Using mp4v codec for MP4 output")
-    elif output_ext == '.webm':
-        # For WebM files, use VP8 codec
-        fourcc = cv2.VideoWriter_fourcc(*'VP80')
-        print("🎬 Using VP80 codec for WebM output")
-    else:
-        # Default to MP4 format and change extension
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    # Use web-compatible codec and ensure MP4 format
+    if not output_path.endswith('.mp4'):
         output_path = os.path.splitext(output_path)[0] + '.mp4'
-        print(f"🎬 Changed output to MP4 format: {output_path}")
     
-    # Create video writer with error checking
-    print(f"🎬 Creating video writer: {output_path}")
-    out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+    # Try different codecs for web compatibility
+    codecs_to_try = [
+        ('mp4v', 'MP4V'),  # Most compatible
+        ('XVID', 'XVID'),  # Fallback 1
+        ('MJPG', 'MJPG')   # Fallback 2
+    ]
+    
+    out = None
+    for codec_name, codec_fourcc in codecs_to_try:
+        print(f"🎬 Trying {codec_name} codec...")
+        fourcc = cv2.VideoWriter_fourcc(*codec_fourcc)
+        out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
+        
+        if out.isOpened():
+            print(f"✅ Successfully created video writer with {codec_name}")
+            break
+        else:
+            print(f"❌ {codec_name} codec failed")
+            out.release()
     
     if not out.isOpened():
         cap.release()
-        # Try alternative codec
-        print("⚠️ First codec failed, trying alternative...")
-        if output_ext == '.mp4':
-            fourcc = cv2.VideoWriter_fourcc(*'XVID')
-            print("🎬 Trying XVID codec")
-        else:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            output_path = os.path.splitext(output_path)[0] + '.mp4'
-            print(f"🎬 Falling back to MP4: {output_path}")
-        
-        out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
-        
-        if not out.isOpened():
-            raise Exception(f"Could not create output video writer with any codec. Output path: {output_path}")
-    
-    print("✅ Video writer created successfully")
+        raise Exception(f"Could not create output video writer with any codec")
     
     frame_count = 0
     successful_frames = 0
-    
-    # Process every 3rd frame to reduce memory usage (instead of every frame)
-    frame_skip = 3
-    print(f"⚡ Processing every {frame_skip} frames to optimize memory usage")
     
     try:
         print(f"🎬 Starting frame processing...")
@@ -431,16 +404,6 @@ def process_video_with_temp_files(input_path, output_path, model):
                 break
             
             frame_count += 1
-            
-            # Skip frames to reduce processing load
-            if frame_count % frame_skip != 0:
-                # For skipped frames, just resize and write original frame
-                if frame.shape[1] != output_width or frame.shape[0] != output_height:
-                    frame_resized = cv2.resize(frame, (output_width, output_height))
-                else:
-                    frame_resized = frame
-                out.write(frame_resized)
-                continue
             
             # Show progress every 20 processed frames
             if successful_frames == 0 or successful_frames % 20 == 0:
@@ -454,11 +417,15 @@ def process_video_with_temp_files(input_path, output_path, model):
                 print(f"🧠 Memory usage: {memory_mb:.1f} MB")
             
             try:
-                # Run YOLO prediction on ORIGINAL frame size with your trained imgsz
-                results = model.predict(frame, verbose=False, conf=0.3, imgsz=832)  # Keep your trained size
-                
-                # Get the annotated frame (this will be original size)
-                annotated_frame = results[0].plot()
+                # Check if using ONNX model
+                if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
+                    # ONNX model
+                    detections = model.predict(frame)
+                    annotated_frame = model.draw_detections(frame, detections)
+                else:
+                    # PyTorch model
+                    results = model.predict(frame, verbose=False, conf=0.3, imgsz=832)
+                    annotated_frame = results[0].plot()
                 
                 # NOW resize the annotated frame for output to save memory
                 if annotated_frame.shape[1] != output_width or annotated_frame.shape[0] != output_height:
