@@ -140,13 +140,17 @@ def upload_file():
             file_data, file_ext, file.filename, model
         )
         
+        # Force proper MIME type for web compatibility
+        if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
+            mime_type = "video/mp4; codecs='avc1.42E01E'"  # Specific H.264 codec info
+        
         print("✅ YOLO processing complete")
         
         # Prepare response
         response_data = {
-            "original_file": f"data:{mime_type};base64,{original_base64}",
-            "output_file": f"data:{mime_type};base64,{processed_base64}",
-            "message": "File processed successfully"
+            "message": "File processed successfully",
+            "original": f"data:{mime_type};base64,{original_base64}",
+            "processed": f"data:{mime_type};base64,{processed_base64}",
         }
         
         print("📤 Sending response to client...")
