@@ -105,34 +105,35 @@ const FileUpload = () => {
 
         // File validation
         const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-        const validVideoTypes = ['video/mp4'];
-        const maxSize = 100 * 1024 * 1024; // 100MB
+        const validVideoTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/webm'];
+        const maxSize = 75 * 1024 * 1024; // 75MB
+        const fileSizeMB = file.size / (1024 * 1024);
 
         if (file.size > maxSize) {
-            alert('File too large! Maximum size is 100MB.');
+            alert('File too large! Maximum size is 75MB.');
             return;
         }
 
         if (!validImageTypes.includes(file.type) && !validVideoTypes.includes(file.type)) {
-            alert('Invalid file type! Please select JPG, PNG, WEBP images or MP4 videos.');
+            alert('Invalid file type! Please select JPG, PNG, WEBP images or MP4, AVI, MOV, WEBM videos.');
             return;
         }
 
-        const fileSizeMB = file.size / (1024 * 1024);
-        
         setLoading(true);
         const currentMediaType = file.type.startsWith('video/') ? 'video' : 'image';
         setMediaType(currentMediaType);
         
         // Dynamic message based on file size
         if (currentMediaType === 'video') {
-            if (fileSizeMB > 20) {
-                setMessage(`Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 10-15 minutes. Please be patient...`);
+            if (fileSizeMB > 30) {
+                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 15-20 minutes. Please be patient and keep this tab open...`);
+            } else if (fileSizeMB > 15) {
+                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 8-12 minutes. Please wait...`);
             } else {
-                setMessage('Processing video... This may take 5-10 minutes depending on video length. Please wait...');
+                setMessage('🔄 Processing video... This may take 3-8 minutes depending on video length. Please wait...');
             }
         } else {
-            setMessage(`Processing ${currentMediaType}...`);
+            setMessage(`🔄 Processing ${currentMediaType}...`);
         }
 
         const formData = new FormData();
@@ -141,37 +142,75 @@ const FileUpload = () => {
         try {
             console.log(`📤 Uploading ${fileSizeMB.toFixed(1)}MB file to server...`);
             
-            // Longer timeout for larger files
-            const timeoutMs = fileSizeMB > 20 ? 1200000 : 900000; // 20 min for large files, 15 min for smaller
+            // Dynamic timeout based on file size
+            let timeoutMs;
+            if (fileSizeMB > 50) {
+                timeoutMs = 1800000; // 30 minutes for very large files
+            } else if (fileSizeMB > 25) {
+                timeoutMs = 1200000; // 20 minutes for large files
+            } else if (fileSizeMB > 10) {
+                timeoutMs = 900000;  // 15 minutes for medium files
+            } else {
+                timeoutMs = 600000;  // 10 minutes for small files
+            }
+            
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => {
+                controller.abort();
+                console.log('❌ Request timed out after', timeoutMs / 1000, 'seconds');
+            }, timeoutMs);
+            
+            console.log(`⏱️ Request timeout set to ${timeoutMs / 60000} minutes`);
             
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
                 method: 'POST',
                 body: formData,
-                signal: AbortSignal.timeout(timeoutMs)
+                signal: controller.signal,
+                // Don't set Content-Type header - let browser handle it for FormData
+                credentials: 'omit'
             });
-    
+
+            clearTimeout(timeoutId);
+
+            console.log('📡 Response received - Status:', response.status);
+            console.log('📡 Response headers:', [...response.headers.entries()]);
+
             if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Upload failed');
+                let errorMessage;
+                try {
+                    const errorData = await response.json();
+                    errorMessage = errorData.error || `HTTP ${response.status}`;
+                } catch {
+                    const errorText = await response.text();
+                    errorMessage = errorText || `HTTP ${response.status}`;
+                }
+                throw new Error(errorMessage);
             }
-    
+
             const data = await response.json();
             console.log('✅ File processing completed successfully');
-            console.log('Response data:', data); // Debug log
+            console.log('📊 Response data size:', JSON.stringify(data).length, 'characters');
             
-            // Fix: Use the correct field names from backend response
             setOriginalMedia(data.original_file || data.original);
             setProcessedMedia(data.output_file || data.processed);
-            setMessage(data.message);
+            setMessage(`✅ ${data.message} (File size: ${data.file_size_mb || fileSizeMB.toFixed(1)}MB)`);
             
         } catch (error) {
             console.error('❌ File upload failed:', error);
+            console.error('❌ Error details:', {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+            });
+            
             if (error.name === 'AbortError') {
-                setMessage('Error: Request timed out. Please try with a smaller file.');
-            } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
-                setMessage('Error: Cannot connect to server. Please make sure the backend is running.');
+                setMessage(`❌ Request timed out. Large files (${fileSizeMB.toFixed(1)}MB) need more time. Please try with a smaller file or check your connection.`);
+            } else if (error.message.includes('NetworkError') || error.message.includes('fetch')) {
+                setMessage('❌ Network error. Please check your internet connection and try again.');
+            } else if (error.message.includes('CORS')) {
+                setMessage('❌ Server configuration error (CORS). Please contact support.');
             } else {
-                setMessage(`Error: ${error.message}`);
+                setMessage(`❌ Error: ${error.message}`);
             }
         } finally {
             setLoading(false);

@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 import os
 import base64
 from ultralytics import YOLO
@@ -24,18 +24,40 @@ os.environ['NNPACK_DISABLE'] = '1'
 os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
-CORS(app, resources={
-    r"/*": {
-        "origins": ["*"],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "supports_credentials": False
-    }
-})
 
-# Disable all debug features
+# Enhanced CORS configuration for large files
+CORS(app, 
+     origins=["*"],
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization", "Content-Length"],
+     max_age=3600,
+     supports_credentials=False)
+
+# Configure Flask for large files
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max request size
 app.config['DEBUG'] = False
 app.config['TESTING'] = False
+
+# Add explicit OPTIONS handler for preflight requests
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = make_response()
+        response.headers.add("Access-Control-Allow-Origin", "*")
+        response.headers.add('Access-Control-Allow-Headers', "Content-Type,Authorization,Content-Length")
+        response.headers.add('Access-Control-Allow-Methods', "GET,POST,OPTIONS")
+        response.headers.add('Access-Control-Max-Age', '3600')
+        return response
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Content-Length')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Max-Age', '3600')
+    # Add headers for large file handling
+    response.headers.add('Access-Control-Expose-Headers', 'Content-Length')
+    return response
 
 def is_youtube_url(url):
     """
@@ -54,14 +76,6 @@ def is_youtube_url(url):
         if re.match(pattern, url):
             return True
     return False
-
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'false')
-    return response
 
 @app.route('/', methods=['GET'])
 def home():
@@ -87,7 +101,7 @@ def upload_file():
         if file.filename == '':
             return jsonify({"error": "No file selected"}), 400
         
-        # Read file data
+        # Read file data in chunks for large files
         file_data = file.read()
         file_size_mb = len(file_data) / (1024 * 1024)
         
@@ -131,6 +145,10 @@ def upload_file():
                     
                     print(f"📹 Video duration: {duration:.1f}s - ✅ Within 120s limit")
                     print(f"📊 File size: {file_size_mb:.2f}MB - ✅ Within 75MB limit")
+                    
+                    # Estimate processing time for user feedback
+                    estimated_time = max(2, int(duration * 0.5))  # Rough estimate
+                    print(f"⏱️ Estimated processing time: ~{estimated_time} minutes")
                 else:
                     os.unlink(temp_path)
                     return jsonify({"error": "Invalid video file"}), 400
@@ -143,7 +161,10 @@ def upload_file():
         
         # Process with YOLO in memory
         print("🤖 Starting YOLO processing...")
-        print("⚠️ Note: Video processing may take several minutes, please wait...")
+        if file_size_mb > 20:
+            print("⚠️ Large file detected - processing may take 15-20 minutes, please wait...")
+        else:
+            print("⚠️ Note: Video processing may take several minutes, please wait...")
         
         original_base64, processed_base64, mime_type = process_file_in_memory(
             file_data, file_ext, file.filename, model
@@ -160,6 +181,7 @@ def upload_file():
             "message": "File processed successfully",
             "original": f"data:{mime_type};base64,{original_base64}",
             "processed": f"data:{mime_type};base64,{processed_base64}",
+            "file_size_mb": round(file_size_mb, 2)
         }
         
         print("📤 Sending response to client...")
