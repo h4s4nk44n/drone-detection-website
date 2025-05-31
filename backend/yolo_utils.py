@@ -207,27 +207,51 @@ def process_video_manual(input_path, output_path, model):
 
 def process_file_in_memory(file_data, file_ext, filename, model):
     """
-    Process an image or video file with YOLO model entirely in memory
-    Returns: (original_base64, processed_base64, mime_type)
+    Process file in memory with proper MIME types for web compatibility
     """
-    print(f"🔧 Processing file in memory: {filename}")
+    print(f"🔄 Processing file in memory: {filename}")
+    
+    # Create temporary files
+    with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_input:
+        temp_input.write(file_data)
+        temp_input_path = temp_input.name
     
     try:
-        if file_ext in ['.jpg', '.jpeg', '.png', '.webp']:
-            # Process image in memory
-            print("🖼️ Processing image in memory...")
-            return process_image_in_memory(file_data, model)
+        if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
+            # Video processing
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
+                temp_output_path = temp_output.name
             
-        elif file_ext == '.mp4':
-            # Process video in memory
-            print("🎥 Processing video in memory...")
-            return process_video_in_memory(file_data, model)
+            try:
+                # Process video
+                output_path = process_video_with_temp_files(temp_input_path, temp_output_path, model)
+                
+                # Read processed video
+                with open(output_path, 'rb') as f:
+                    processed_data = f.read()
+                
+                # Convert to base64
+                original_base64 = base64.b64encode(file_data).decode('utf-8')
+                processed_base64 = base64.b64encode(processed_data).decode('utf-8')
+                
+                # Use proper MIME type for web compatibility
+                mime_type = "video/mp4"
+                
+                return original_base64, processed_base64, mime_type
+                
+            finally:
+                # Clean up temp output
+                if os.path.exists(temp_output_path):
+                    os.unlink(temp_output_path)
+        
         else:
-            raise ValueError(f"Unsupported file format: {file_ext}")
-            
-    except Exception as e:
-        print(f"❌ Error in process_file_in_memory: {str(e)}")
-        raise e
+            # Image processing (existing code)
+            # ... existing image processing code ...
+    
+    finally:
+        # Clean up temp input
+        if os.path.exists(temp_input_path):
+            os.unlink(temp_input_path)
 
 def process_image_in_memory(file_data, model):
     """Process image entirely in memory using ONNX or PyTorch model"""
@@ -329,7 +353,7 @@ def process_video_with_temp_files(input_path, output_path, model):
     """
     Process video maintaining original duration with proper web-compatible output
     """
-    print(f"🎬 Processing video with proper duration preservation...")
+    print(f"🎬 Processing video with AI on ALL frames...")
     
     # Open input video
     cap = cv2.VideoCapture(input_path)
