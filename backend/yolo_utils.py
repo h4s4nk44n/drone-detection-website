@@ -327,200 +327,171 @@ def process_video_in_memory(file_data, model):
 
 def process_video_with_temp_files(input_path, output_path, model):
     """
-    Process video frame by frame - optimized for web playback
+    Memory-optimized video processing that actually works
     """
-    print(f"🎬 Processing video with temp files...")
+    print(f"🎬 Starting memory-optimized video processing...")
     
     # Open input video
     cap = cv2.VideoCapture(input_path)
-    
     if not cap.isOpened():
         raise Exception(f"Could not open video file: {input_path}")
     
     # Get video properties
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    original_fps = int(cap.get(cv2.CAP_PROP_FPS))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    # Ensure even dimensions (required for many codecs)
-    if width % 2 != 0:
-        width -= 1
-    if height % 2 != 0:
-        height -= 1
+    # Reduce FPS to save memory and processing time
+    output_fps = min(15, original_fps)  # Cap at 15 FPS
     
-    # Reduce output resolution to save memory
-    output_width = min(width, 854)
-    output_height = min(height, 480)
-    
-    # Maintain aspect ratio and ensure even dimensions
-    if width > 854 or height > 480:
-        scale_factor = min(854/width, 480/height)
-        output_width = int(width * scale_factor)
-        output_height = int(height * scale_factor)
-        
-        # Ensure even dimensions
-        if output_width % 2 != 0:
-            output_width -= 1
-        if output_height % 2 != 0:
-            output_height -= 1
-            
-        print(f"📏 Output video will be scaled to {output_width}x{output_height} to save memory")
+    # Much smaller output resolution to prevent memory issues
+    max_dimension = 480  # Maximum width or height
+    if width > height:
+        output_width = max_dimension
+        output_height = int(height * (max_dimension / width))
     else:
-        output_width = width
-        output_height = height
+        output_height = max_dimension
+        output_width = int(width * (max_dimension / height))
     
-    print(f"📊 Video properties:")
-    print(f"   - Input Resolution: {width}x{height}")
-    print(f"   - Output Resolution: {output_width}x{output_height}")
-    print(f"   - FPS: {fps}")
-    print(f"   - Total frames: {total_frames}")
+    # Ensure even dimensions (required for video codecs)
+    output_width = output_width - (output_width % 2)
+    output_height = output_height - (output_height % 2)
     
-    # Ensure output is MP4 format
+    print(f"📊 Video optimization:")
+    print(f"   - Input: {width}x{height} @ {original_fps} fps ({total_frames} frames)")
+    print(f"   - Output: {output_width}x{output_height} @ {output_fps} fps")
+    print(f"   - Size reduction: {((width*height)/(output_width*output_height)):.1f}x smaller")
+    
+    # Force MP4 output with compatible codec
     if not output_path.endswith('.mp4'):
         output_path = os.path.splitext(output_path)[0] + '.mp4'
-        print(f"🎬 Changed output to MP4: {output_path}")
     
-    # Try different codecs in order of compatibility
-    codecs_to_try = [
-        ('MJPG', 'Motion JPEG - most compatible'),
-        ('mp4v', 'MP4V - standard'),
-        ('XVID', 'XVID - fallback'),
-        ('X264', 'H264 - if available')
-    ]
+    # Use MJPG codec - most reliable for web playback
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    out = cv2.VideoWriter(output_path, fourcc, output_fps, (output_width, output_height))
     
-    out = None
-    successful_codec = None
-    
-    for codec_fourcc, codec_description in codecs_to_try:
-        print(f"🎬 Trying {codec_fourcc} codec ({codec_description})...")
-        
-        try:
-            fourcc = cv2.VideoWriter_fourcc(*codec_fourcc)
-            out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
-            
-            # Test if the writer actually works by checking if it's opened
-            if out.isOpened():
-                print(f"✅ Successfully created video writer with {codec_fourcc}")
-                successful_codec = codec_fourcc
-                break
-            else:
-                print(f"❌ {codec_fourcc} codec failed to open")
-                if out:
-                    out.release()
-                out = None
-                
-        except Exception as codec_error:
-            print(f"❌ {codec_fourcc} codec error: {codec_error}")
-            if out:
-                out.release()
-            out = None
-    
-    if not out or not out.isOpened():
+    if not out.isOpened():
         cap.release()
-        raise Exception(f"Could not create output video writer with any codec. Tried: {[c[0] for c in codecs_to_try]}")
+        raise Exception("Failed to create video writer - codec issue")
     
-    print(f"🎬 Video writer ready with {successful_codec} codec")
+    print("✅ Video writer created successfully with MJPG codec")
     
     frame_count = 0
-    successful_frames = 0
+    ai_processed = 0
+    frames_written = 0
     
-    # Process every 3rd frame to reduce memory usage
-    frame_skip = 3
-    print(f"⚡ Processing every {frame_skip} frames to optimize memory usage")
+    # Skip frames aggressively to reduce memory usage
+    frame_skip = max(1, original_fps // output_fps)  # Skip frames to match target FPS
+    ai_process_every = 8  # Only run AI on every 8th frame
+    
+    print(f"⚡ Frame processing strategy:")
+    print(f"   - Processing every {frame_skip} frames for FPS reduction")
+    print(f"   - Running AI on every {ai_process_every} processed frames")
     
     try:
-        print(f"🎬 Starting frame processing...")
-        
         while True:
             ret, frame = cap.read()
             if not ret:
-                print(f"📹 End of video reached at frame {frame_count}")
                 break
             
             frame_count += 1
             
-            # Skip frames to reduce processing load
+            # Skip frames to reduce FPS
             if frame_count % frame_skip != 0:
-                # For skipped frames, just resize and write original frame
-                if frame.shape[1] != output_width or frame.shape[0] != output_height:
-                    frame_resized = cv2.resize(frame, (output_width, output_height))
-                else:
-                    frame_resized = frame
-                
-                # Verify frame write
-                write_success = out.write(frame_resized)
-                if not write_success:
-                    print(f"⚠️ Failed to write frame {frame_count}")
                 continue
             
-            # Show progress every 20 processed frames
-            if successful_frames == 0 or successful_frames % 20 == 0:
-                progress = (frame_count / total_frames) * 100
-                print(f"📹 Frame {frame_count}/{total_frames} ({progress:.1f}%) - AI Processed: {successful_frames}")
+            # Resize frame immediately to save memory
+            frame_resized = cv2.resize(frame, (output_width, output_height))
             
-            try:
-                # Run YOLO prediction
-                results = model.predict(frame, verbose=False, conf=0.3, imgsz=832)
-                annotated_frame = results[0].plot()
+            # Only run AI processing on some frames
+            if (frame_count // frame_skip) % ai_process_every == 0:
+                try:
+                    # Check if ONNX model
+                    if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
+                        # ONNX model
+                        detections = model.predict(frame_resized)
+                        if len(detections) > 0:
+                            processed_frame = model.draw_detections(frame_resized, detections)
+                            ai_processed += 1
+                            print(f"🎯 AI detected {len(detections)} objects in frame {frame_count}")
+                        else:
+                            processed_frame = frame_resized
+                    else:
+                        # PyTorch model - use smaller input size to save memory
+                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=320)
+                        processed_frame = results[0].plot()
+                        ai_processed += 1
+                    
+                    # Write the AI-processed frame
+                    write_success = out.write(processed_frame)
+                    
+                except Exception as ai_error:
+                    print(f"⚠️ AI processing failed for frame {frame_count}: {ai_error}")
+                    # Fallback to original frame
+                    write_success = out.write(frame_resized)
+            else:
+                # Write original resized frame (no AI processing)
+                write_success = out.write(frame_resized)
+            
+            if write_success:
+                frames_written += 1
+            else:
+                print(f"❌ Failed to write frame {frame_count}")
+                # If writing fails, something is seriously wrong
+                break
+            
+            # Progress and memory monitoring
+            if frame_count % 100 == 0:
+                progress = (frame_count / total_frames) * 100
+                print(f"📹 Progress: {progress:.1f}% - AI: {ai_processed}, Written: {frames_written}")
                 
-                # Resize the annotated frame for output
-                if annotated_frame.shape[1] != output_width or annotated_frame.shape[0] != output_height:
-                    annotated_frame = cv2.resize(annotated_frame, (output_width, output_height))
+                # Check memory usage
+                import psutil
+                memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
+                print(f"🧠 Memory: {memory_mb:.1f} MB")
                 
-                # Write the frame to output video
-                write_success = out.write(annotated_frame)
-                if not write_success:
-                    print(f"⚠️ Failed to write processed frame {frame_count}")
-                else:
-                    successful_frames += 1
-                
-                # Force garbage collection every 30 frames
-                if successful_frames % 30 == 0:
+                if memory_mb > 3000:  # If approaching 3GB, force cleanup
+                    print("🧹 Forcing garbage collection due to high memory usage")
                     import gc
                     gc.collect()
-                
-            except Exception as frame_error:
-                print(f"⚠️ Error processing frame {frame_count}: {frame_error}")
-                # Write original frame if processing fails
-                if frame.shape[1] != output_width or frame.shape[0] != output_height:
-                    frame_resized = cv2.resize(frame, (output_width, output_height))
-                else:
-                    frame_resized = frame
-                out.write(frame_resized)
+            
+            # Regular garbage collection
+            if frame_count % 50 == 0:
+                import gc
+                gc.collect()
         
-        print(f"✅ Video processing complete!")
-        print(f"   - Total frames: {frame_count}")
-        print(f"   - AI processed frames: {successful_frames}")
-        print(f"   - Codec used: {successful_codec}")
+        print(f"✅ Video processing completed!")
+        print(f"   - Input frames: {frame_count}")
+        print(f"   - Output frames: {frames_written}")
+        print(f"   - AI processed: {ai_processed}")
         
     except Exception as e:
         print(f"❌ Error during video processing: {str(e)}")
         raise e
     finally:
-        # Always clean up
-        print("🧹 Cleaning up video resources...")
+        # Cleanup
+        print("🧹 Cleaning up resources...")
         cap.release()
         if out:
             out.release()
         cv2.destroyAllWindows()
         
-        # Force garbage collection
+        # Final garbage collection
         import gc
         gc.collect()
     
-    # Verify the output file was created
+    # Verify output file
     if not os.path.exists(output_path):
         raise Exception("Output video file was not created")
     
     file_size = os.path.getsize(output_path)
-    if file_size < 1024:  # Less than 1KB is probably empty
-        raise Exception("Output video file is too small, likely empty")
+    if file_size < 1024:
+        raise Exception("Output video file is too small (likely empty)")
     
-    print(f"📊 Output video created: {file_size / (1024*1024):.2f} MB")
-    
+    print(f"📊 Final output: {file_size / (1024*1024):.2f} MB")
     return output_path
-    
+
 def process_youtube_video(youtube_url, model):
     """
     Download and process YouTube video entirely in memory
