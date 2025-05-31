@@ -19,6 +19,10 @@ import gc
 # Load environment variables
 load_dotenv()
 
+# Configure PyTorch for Cloud Run environment
+os.environ['NNPACK_DISABLE'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+
 app = Flask(__name__)
 CORS(app, origins=["https://drone-detection-website.vercel.app", "https://*.vercel.app"], 
      allow_headers=["Content-Type", "Authorization"],
@@ -67,16 +71,13 @@ model_path = os.path.join(os.path.dirname(__file__), 'models', 'best.pt')
 model = YOLO(model_path)
 print("✅ YOLO model loaded successfully")
 
-@app.route('/api/upload', methods=['POST', 'OPTIONS'])
+@app.route('/api/upload', methods=['POST'])
 def upload_file():
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'OK'}), 200
-        
     try:
         print("📤 Upload request received")
         
         if 'file' not in request.files:
-            return jsonify({"error": "No file part"}), 400
+            return jsonify({"error": "No file provided"}), 400
             
         file = request.files['file']
         if file.filename == '':
@@ -156,19 +157,15 @@ def upload_file():
         traceback.print_exc()
         return jsonify({"error": f"Processing failed: {str(e)}"}), 500
 
-@app.route('/api/youtube', methods=['POST', 'OPTIONS'])
+@app.route('/api/youtube', methods=['POST'])
 def process_youtube():
-    if request.method == 'OPTIONS':
-        return jsonify({'status': 'OK'}), 200
-        
     try:
-        print("🔗 YouTube processing request received")
-        
         data = request.get_json()
-        if not data or 'url' not in data:
+        youtube_url = data.get('url')
+        
+        if not youtube_url:
             return jsonify({"error": "No YouTube URL provided"}), 400
         
-        youtube_url = data['url'].strip()
         print(f"🔗 Processing YouTube URL: {youtube_url}")
         
         # Validate YouTube URL

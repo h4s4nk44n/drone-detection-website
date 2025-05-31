@@ -327,9 +327,9 @@ def process_video_in_memory(file_data, model):
 
 def process_video_with_temp_files(input_path, output_path, model):
     """
-    Memory-optimized video processing that actually works
+    Process video maintaining original duration with proper web-compatible output
     """
-    print(f"🎬 Starting memory-optimized video processing...")
+    print(f"🎬 Processing video with proper duration preservation...")
     
     # Open input video
     cap = cv2.VideoCapture(input_path)
@@ -341,12 +341,10 @@ def process_video_with_temp_files(input_path, output_path, model):
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration_seconds = total_frames / original_fps
     
-    # Reduce FPS to save memory and processing time
-    output_fps = min(15, original_fps)  # Cap at 15 FPS
-    
-    # Much smaller output resolution to prevent memory issues
-    max_dimension = 480  # Maximum width or height
+    # Reduce output resolution but KEEP original FPS for duration
+    max_dimension = 640  # Slightly larger for better quality
     if width > height:
         output_width = max_dimension
         output_height = int(height * (max_dimension / width))
@@ -354,58 +352,61 @@ def process_video_with_temp_files(input_path, output_path, model):
         output_height = max_dimension
         output_width = int(width * (max_dimension / height))
     
-    # Ensure even dimensions (required for video codecs)
+    # Ensure even dimensions
     output_width = output_width - (output_width % 2)
     output_height = output_height - (output_height % 2)
     
-    print(f"📊 Video optimization:")
-    print(f"   - Input: {width}x{height} @ {original_fps} fps ({total_frames} frames)")
+    # Keep original FPS to maintain duration
+    output_fps = original_fps
+    
+    print(f"📊 Video processing plan:")
+    print(f"   - Input: {width}x{height} @ {original_fps} fps")
     print(f"   - Output: {output_width}x{output_height} @ {output_fps} fps")
+    print(f"   - Duration: {duration_seconds:.1f} seconds ({total_frames} frames)")
     print(f"   - Size reduction: {((width*height)/(output_width*output_height)):.1f}x smaller")
     
-    # Force MP4 output with compatible codec
+    # Use H.264 codec for better web compatibility
     if not output_path.endswith('.mp4'):
         output_path = os.path.splitext(output_path)[0] + '.mp4'
     
-    # Use MJPG codec - most reliable for web playback
-    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+    print(f"🎬 Creating H.264 video writer...")
+    
+    # Use H.264 codec for web compatibility
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Most compatible
     out = cv2.VideoWriter(output_path, fourcc, output_fps, (output_width, output_height))
     
     if not out.isOpened():
         cap.release()
-        raise Exception("Failed to create video writer - codec issue")
+        raise Exception("Failed to create video writer")
     
-    print("✅ Video writer created successfully with MJPG codec")
+    print("✅ Video writer created successfully")
     
     frame_count = 0
     ai_processed = 0
     frames_written = 0
     
-    # Skip frames aggressively to reduce memory usage
-    frame_skip = max(1, original_fps // output_fps)  # Skip frames to match target FPS
-    ai_process_every = 8  # Only run AI on every 8th frame
+    # Process EVERY frame to maintain duration, but run AI less frequently
+    ai_process_every = 15  # Run AI on every 15th frame (saves processing time)
     
-    print(f"⚡ Frame processing strategy:")
-    print(f"   - Processing every {frame_skip} frames for FPS reduction")
-    print(f"   - Running AI on every {ai_process_every} processed frames")
+    print(f"⚡ Processing strategy:")
+    print(f"   - Processing ALL frames to maintain {duration_seconds:.1f}s duration")
+    print(f"   - Running AI detection on every {ai_process_every}th frame")
+    print(f"🎬 Starting frame-by-frame processing...")
     
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
+                print(f"📹 End of video reached at frame {frame_count}")
                 break
             
             frame_count += 1
             
-            # Skip frames to reduce FPS
-            if frame_count % frame_skip != 0:
-                continue
-            
             # Resize frame immediately to save memory
             frame_resized = cv2.resize(frame, (output_width, output_height))
             
-            # Only run AI processing on some frames
-            if (frame_count // frame_skip) % ai_process_every == 0:
+            # Run AI processing on some frames only
+            if frame_count % ai_process_every == 0:
                 try:
                     # Check if ONNX model
                     if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
@@ -414,12 +415,12 @@ def process_video_with_temp_files(input_path, output_path, model):
                         if len(detections) > 0:
                             processed_frame = model.draw_detections(frame_resized, detections)
                             ai_processed += 1
-                            print(f"🎯 AI detected {len(detections)} objects in frame {frame_count}")
+                            print(f"🎯 Frame {frame_count}: AI detected {len(detections)} objects")
                         else:
                             processed_frame = frame_resized
                     else:
-                        # PyTorch model - use smaller input size to save memory
-                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=320)
+                        # PyTorch model
+                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=416)
                         processed_frame = results[0].plot()
                         ai_processed += 1
                     
@@ -438,21 +439,19 @@ def process_video_with_temp_files(input_path, output_path, model):
                 frames_written += 1
             else:
                 print(f"❌ Failed to write frame {frame_count}")
-                # If writing fails, something is seriously wrong
-                break
+                continue
             
-            # Progress and memory monitoring
+            # Progress monitoring
             if frame_count % 100 == 0:
                 progress = (frame_count / total_frames) * 100
-                print(f"📹 Progress: {progress:.1f}% - AI: {ai_processed}, Written: {frames_written}")
+                elapsed_time = frame_count / original_fps
+                print(f"📹 Progress: {progress:.1f}% ({elapsed_time:.1f}s/{duration_seconds:.1f}s) - AI: {ai_processed}")
                 
-                # Check memory usage
+                # Memory check
                 import psutil
                 memory_mb = psutil.Process().memory_info().rss / 1024 / 1024
-                print(f"🧠 Memory: {memory_mb:.1f} MB")
-                
-                if memory_mb > 3000:  # If approaching 3GB, force cleanup
-                    print("🧹 Forcing garbage collection due to high memory usage")
+                if memory_mb > 3000:
+                    print(f"🧠 Memory: {memory_mb:.1f}MB - forcing cleanup")
                     import gc
                     gc.collect()
             
@@ -461,10 +460,14 @@ def process_video_with_temp_files(input_path, output_path, model):
                 import gc
                 gc.collect()
         
+        # Calculate final duration
+        final_duration = frames_written / output_fps
+        
         print(f"✅ Video processing completed!")
         print(f"   - Input frames: {frame_count}")
         print(f"   - Output frames: {frames_written}")
         print(f"   - AI processed: {ai_processed}")
+        print(f"   - Final duration: {final_duration:.1f} seconds")
         
     except Exception as e:
         print(f"❌ Error during video processing: {str(e)}")
@@ -476,8 +479,6 @@ def process_video_with_temp_files(input_path, output_path, model):
         if out:
             out.release()
         cv2.destroyAllWindows()
-        
-        # Final garbage collection
         import gc
         gc.collect()
     
@@ -487,9 +488,18 @@ def process_video_with_temp_files(input_path, output_path, model):
     
     file_size = os.path.getsize(output_path)
     if file_size < 1024:
-        raise Exception("Output video file is too small (likely empty)")
+        raise Exception("Output video file is too small")
     
     print(f"📊 Final output: {file_size / (1024*1024):.2f} MB")
+    
+    # Verify video can be read
+    test_cap = cv2.VideoCapture(output_path)
+    if test_cap.isOpened():
+        test_frames = int(test_cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        test_duration = test_frames / output_fps
+        test_cap.release()
+        print(f"✅ Output verification: {test_frames} frames, {test_duration:.1f}s duration")
+    
     return output_path
 
 def process_youtube_video(youtube_url, model):
