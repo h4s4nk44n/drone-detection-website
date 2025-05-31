@@ -24,9 +24,14 @@ os.environ['NNPACK_DISABLE'] = '1'
 os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
-CORS(app, origins=["https://drone-detection-website.vercel.app", "https://*.vercel.app"], 
-     allow_headers=["Content-Type", "Authorization"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
+CORS(app, resources={
+    r"/*": {
+        "origins": ["*"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "supports_credentials": False
+    }
+})
 
 # Disable all debug features
 app.config['DEBUG'] = False
