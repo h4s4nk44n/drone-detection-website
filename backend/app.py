@@ -25,12 +25,12 @@ os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
 
-# Enhanced CORS configuration for large files
+# Simple but effective CORS configuration
 CORS(app, 
      origins=["*"],
      methods=["GET", "POST", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization", "Content-Length"],
-     max_age=3600,
+     allow_headers=["*"],
+     expose_headers=["*"],
      supports_credentials=False)
 
 # Configure Flask for large files
@@ -38,7 +38,7 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max request size
 app.config['DEBUG'] = False
 app.config['TESTING'] = False
 
-# Add explicit OPTIONS handler for preflight requests
+# Add back the important CORS handlers for large files
 @app.before_request
 def handle_preflight():
     if request.method == "OPTIONS":
@@ -55,7 +55,7 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Content-Length')
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     response.headers.add('Access-Control-Max-Age', '3600')
-    # Add headers for large file handling
+    # Important headers for large file handling
     response.headers.add('Access-Control-Expose-Headers', 'Content-Length')
     return response
 
