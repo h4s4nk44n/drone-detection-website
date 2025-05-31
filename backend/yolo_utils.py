@@ -218,7 +218,7 @@ def process_file_in_memory(file_data, file_ext, filename, model):
     
     try:
         if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
-            # Video processing
+            # Video processing - output as MP4 for Cloud Run compatibility
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
                 temp_output_path = temp_output.name
             
@@ -234,8 +234,10 @@ def process_file_in_memory(file_data, file_ext, filename, model):
                 original_base64 = base64.b64encode(file_data).decode('utf-8')
                 processed_base64 = base64.b64encode(processed_data).decode('utf-8')
                 
-                # Use proper MIME type for web compatibility
+                # Use MP4 MIME type for better browser compatibility
                 mime_type = "video/mp4"
+                
+                print(f"🎥 Output MIME type: {mime_type}")
                 
                 return original_base64, processed_base64, mime_type
                 
@@ -387,9 +389,9 @@ def process_video_in_memory(file_data, model):
 
 def process_video_with_temp_files(input_path, output_path, model):
     """
-    Process video with WebM output for optimal web compatibility
+    Process video with MP4 H.264 output for Cloud Run compatibility
     """
-    print(f"🎬 Processing video with WebM output for web browsers...")
+    print(f"🎬 Processing video with MP4 H.264 output...")
     
     # Open input video
     cap = cv2.VideoCapture(input_path)
@@ -424,23 +426,23 @@ def process_video_with_temp_files(input_path, output_path, model):
     print(f"   - Output: {output_width}x{output_height} @ {output_fps} fps (WebM)")
     print(f"   - AI will process: ALL frames")
     
-    # Force WebM output for web compatibility
-    if not output_path.endswith('.webm'):
-        output_path = os.path.splitext(output_path)[0] + '.webm'
+    # Force MP4 output for Cloud Run compatibility
+    if not output_path.endswith('.mp4'):
+        output_path = os.path.splitext(output_path)[0] + '.mp4'
     
-    print(f"🌐 Creating WebM video writer for web browsers...")
+    print(f"🌐 Creating MP4 H.264 video writer for Cloud Run...")
     
-    # Try WebM codecs (VP8, VP9)
-    webm_codecs = [
-        ('VP80', 'VP8 (WebM standard)'),
-        ('VP90', 'VP9 (Better quality)'),
-        ('vp08', 'VP8 alternative'),
+    # Try H.264 codecs that work well on Cloud Run
+    h264_codecs = [
+        ('mp4v', 'MPEG-4 (most compatible)'),
+        ('XVID', 'XVID (good fallback)'),
+        ('MJPG', 'Motion JPEG (always works)')
     ]
     
     out = None
     working_codec = None
     
-    for codec_fourcc, codec_name in webm_codecs:
+    for codec_fourcc, codec_name in h264_codecs:
         try:
             print(f"🔧 Testing {codec_name}...")
             fourcc = cv2.VideoWriter_fourcc(*codec_fourcc)
@@ -452,7 +454,7 @@ def process_video_with_temp_files(input_path, output_path, model):
                 success = out.write(test_frame)
                 if success:
                     working_codec = codec_fourcc
-                    print(f"✅ {codec_name} working for WebM!")
+                    print(f"✅ {codec_name} working on Cloud Run!")
                     break
                 else:
                     print(f"❌ {codec_name} write test failed")
@@ -469,29 +471,11 @@ def process_video_with_temp_files(input_path, output_path, model):
                 out.release()
             out = None
     
-    # Fallback to MP4 if WebM fails
-    if not out:
-        print("🔄 WebM failed, trying MP4 fallback...")
-        output_path = os.path.splitext(output_path)[0] + '.mp4'
-        try:
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(output_path, fourcc, output_fps, (output_width, output_height))
-            if out and out.isOpened():
-                test_frame = np.ones((output_height, output_width, 3), dtype=np.uint8) * 128
-                if out.write(test_frame):
-                    working_codec = 'mp4v'
-                    print("✅ MP4 fallback working")
-                else:
-                    out.release()
-                    out = None
-        except:
-            out = None
-    
     if not out:
         cap.release()
-        raise Exception("Could not create video writer (tried WebM and MP4)")
+        raise Exception("Could not create video writer with any codec")
     
-    print(f"🌐 Using {working_codec} codec, output: {os.path.basename(output_path)}")
+    print(f"🎯 Using {working_codec} codec for output: {os.path.basename(output_path)}")
     
     frame_count = 0
     written_count = 0

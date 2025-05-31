@@ -142,19 +142,21 @@ const FileUpload = () => {
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
                 method: 'POST',
                 body: formData,
-                signal: AbortSignal.timeout(600000) // 10 minutes timeout
+                signal: AbortSignal.timeout(600000)
             });
-
+    
             if (!response.ok) {
                 const errorData = await response.json();
                 throw new Error(errorData.error || 'Upload failed');
             }
-
+    
             const data = await response.json();
             console.log('✅ File processing completed successfully');
+            console.log('Response data:', data); // Debug log
             
-            setOriginalMedia(data.original_file);
-            setProcessedMedia(data.output_file);
+            // Fix: Use the correct field names from backend response
+            setOriginalMedia(data.original_file || data.original);
+            setProcessedMedia(data.output_file || data.processed);
             setMessage(data.message);
             
         } catch (error) {
