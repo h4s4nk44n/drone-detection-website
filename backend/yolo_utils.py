@@ -245,8 +245,44 @@ def process_file_in_memory(file_data, file_ext, filename, model):
                     os.unlink(temp_output_path)
         
         else:
-            # Image processing (existing code)
-            # ... existing image processing code ...
+            # Image processing
+            print(f"🖼️ Processing image: {filename}")
+            
+            # Load image
+            image = cv2.imread(temp_input_path)
+            if image is None:
+                raise Exception(f"Could not load image: {filename}")
+            
+            # Run inference
+            if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
+                # ONNX model
+                detections = model.predict(image)
+                if len(detections) > 0:
+                    processed_image = model.draw_detections(image, detections)
+                    print(f"🎯 ONNX detected {len(detections)} objects")
+                else:
+                    processed_image = image
+                    print("🔍 ONNX found no objects")
+            else:
+                # PyTorch model
+                results = model.predict(image, verbose=False, conf=0.3)
+                processed_image = results[0].plot()
+                print(f"🎯 PyTorch processed image")
+            
+            # Convert to bytes
+            _, buffer = cv2.imencode('.jpg', image)
+            original_bytes = buffer.tobytes()
+            
+            _, buffer = cv2.imencode('.jpg', processed_image)
+            processed_bytes = buffer.tobytes()
+            
+            # Convert to base64
+            original_base64 = base64.b64encode(original_bytes).decode('utf-8')
+            processed_base64 = base64.b64encode(processed_bytes).decode('utf-8')
+            
+            mime_type = "image/jpeg"
+            
+            return original_base64, processed_base64, mime_type
     
     finally:
         # Clean up temp input
