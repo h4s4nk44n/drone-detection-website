@@ -14,6 +14,7 @@ const FileUpload = () => {
     const [currentSessionId, setCurrentSessionId] = useState(null);
     const [processingMode, setProcessingMode] = useState('file'); // 'file' or 'youtube'
     const fileInputRef = useRef(null);
+    const [error, setError] = useState('');
 
     // Test server connection on component mount
     useEffect(() => {
@@ -51,29 +52,26 @@ const FileUpload = () => {
         return () => clearInterval(interval);
     }, []);
 
-    const handleFileChange = (event) => {
-        const selectedFile = event.target.files[0];
-        
+    const handleFileChange = (e) => {
+        const selectedFile = e.target.files[0];
         if (selectedFile) {
-            // Check file size limits
-            const maxSize = selectedFile.type.startsWith('video/') ? 25 * 1024 * 1024 : 10 * 1024 * 1024; // 25MB for video, 10MB for images
+            // Updated file size limit to match backend
+            const maxSizeMB = 75; // Changed from 25 to 75
+            const fileSizeMB = selectedFile.size / (1024 * 1024);
             
-            if (selectedFile.size > maxSize) {
-                alert(`File too large! Maximum size is ${selectedFile.type.startsWith('video/') ? '25MB for videos' : '10MB for images'}.`);
-                event.target.value = ''; // Clear the input
+            if (fileSizeMB > maxSizeMB) {
+                setError(`File too large. Maximum size is ${maxSizeMB}MB.`);
+                setFile(null);
                 return;
             }
             
-            console.log('📁 File selected:', {
-                name: selectedFile.name,
-                size: `${(selectedFile.size / (1024*1024)).toFixed(2)} MB`,
-                type: selectedFile.type
-            });
+            setFile(selectedFile);
+            setError('');
+            
+            // Create preview URL
+            const url = URL.createObjectURL(selectedFile);
+            setOriginalMedia(url);
         }
-        
-        setFile(selectedFile);
-        setYoutubeUrl(''); // Clear YouTube URL when file is selected
-        setProcessingMode('file');
     };
 
     const handleYoutubeUrlChange = (event) => {
