@@ -118,12 +118,19 @@ const FileUpload = () => {
             return;
         }
 
+        const fileSizeMB = file.size / (1024 * 1024);
+        
         setLoading(true);
         const currentMediaType = file.type.startsWith('video/') ? 'video' : 'image';
         setMediaType(currentMediaType);
         
+        // Dynamic message based on file size
         if (currentMediaType === 'video') {
-            setMessage('Processing video... This may take 5-10 minutes depending on video length. Please wait...');
+            if (fileSizeMB > 20) {
+                setMessage(`Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 10-15 minutes. Please be patient...`);
+            } else {
+                setMessage('Processing video... This may take 5-10 minutes depending on video length. Please wait...');
+            }
         } else {
             setMessage(`Processing ${currentMediaType}...`);
         }
@@ -132,15 +139,15 @@ const FileUpload = () => {
         formData.append('file', file);
 
         try {
-            console.log('📤 Uploading file to server...');
+            console.log(`📤 Uploading ${fileSizeMB.toFixed(1)}MB file to server...`);
             
-            // Increase timeout for video files
-            const timeoutMs = file.type.startsWith('video/') ? 600000 : 300000; // 10 min for video, 5 min for images
+            // Longer timeout for larger files
+            const timeoutMs = fileSizeMB > 20 ? 1200000 : 900000; // 20 min for large files, 15 min for smaller
             
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
                 method: 'POST',
                 body: formData,
-                signal: AbortSignal.timeout(600000)
+                signal: AbortSignal.timeout(timeoutMs)
             });
     
             if (!response.ok) {
