@@ -53,17 +53,27 @@ const FileUpload = () => {
 
     const handleFileChange = (event) => {
         const selectedFile = event.target.files[0];
-        setFile(selectedFile);
-        setYoutubeUrl(''); // Clear YouTube URL when file is selected
-        setProcessingMode('file');
         
         if (selectedFile) {
+            // Check file size limits
+            const maxSize = selectedFile.type.startsWith('video/') ? 25 * 1024 * 1024 : 10 * 1024 * 1024; // 25MB for video, 10MB for images
+            
+            if (selectedFile.size > maxSize) {
+                alert(`File too large! Maximum size is ${selectedFile.type.startsWith('video/') ? '25MB for videos' : '10MB for images'}.`);
+                event.target.value = ''; // Clear the input
+                return;
+            }
+            
             console.log('📁 File selected:', {
                 name: selectedFile.name,
                 size: `${(selectedFile.size / (1024*1024)).toFixed(2)} MB`,
                 type: selectedFile.type
             });
         }
+        
+        setFile(selectedFile);
+        setYoutubeUrl(''); // Clear YouTube URL when file is selected
+        setProcessingMode('file');
     };
 
     const handleYoutubeUrlChange = (event) => {
@@ -124,7 +134,10 @@ const FileUpload = () => {
         formData.append('file', file);
 
         try {
-            console.log('📤 Sending file to server...');
+            console.log('📤 Uploading file to server...');
+            
+            // Increase timeout for video files
+            const timeoutMs = file.type.startsWith('video/') ? 600000 : 300000; // 10 min for video, 5 min for images
             
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
                 method: 'POST',

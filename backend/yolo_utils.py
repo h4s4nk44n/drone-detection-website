@@ -326,7 +326,7 @@ def process_video_in_memory(file_data, model):
 
 def process_video_with_temp_files(input_path, output_path, model):
     """
-    Process video frame by frame using temporary files - optimized for Cloud Run
+    Process video frame by frame using temporary files - optimized for low memory
     """
     print(f"🎬 Processing video with temp files...")
     
@@ -342,21 +342,29 @@ def process_video_with_temp_files(input_path, output_path, model):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
-    # Reduce resolution if too high to save memory
-    if width > 1280 or height > 720:
-        scale_factor = min(1280/width, 720/height)
-        width = int(width * scale_factor)
-        height = int(height * scale_factor)
-        print(f"📏 Scaling video to {width}x{height} to save memory")
+    # Reduce output resolution to save memory, but keep YOLO processing at full size
+    output_width = min(width, 854)  # Max 854p width
+    output_height = min(height, 480)  # Max 480p height
+    
+    # Maintain aspect ratio
+    if width > 854 or height > 480:
+        scale_factor = min(854/width, 480/height)
+        output_width = int(width * scale_factor)
+        output_height = int(height * scale_factor)
+        print(f"📏 Output video will be scaled to {output_width}x{output_height} to save memory")
+    else:
+        output_width = width
+        output_height = height
     
     print(f"📊 Video properties:")
-    print(f"   - Resolution: {width}x{height}")
+    print(f"   - Input Resolution: {width}x{height}")
+    print(f"   - Output Resolution: {output_width}x{output_height}")
     print(f"   - FPS: {fps}")
     print(f"   - Total frames: {total_frames}")
     
-    # Use VP8 codec for better compatibility
-    fourcc = cv2.VideoWriter_fourcc(*'VP80')
-    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    # Use more efficient codec
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (output_width, output_height))
     
     if not out.isOpened():
         cap.release()
@@ -365,10 +373,9 @@ def process_video_with_temp_files(input_path, output_path, model):
     frame_count = 0
     successful_frames = 0
     
-    # Process every nth frame to speed up processing for long videos
-    frame_skip = max(1, total_frames // 1000)  # Process max 1000 frames
-    if frame_skip > 1:
-        print(f"⚡ Processing every {frame_skip} frames to optimize performance")
+    # Process every 3rd frame to reduce memory usage (instead of every frame)
+    frame_skip = 3
+    print(f"⚡ Processing every {frame_skip} frames to optimize memory usage")
     
     try:
         print(f"🎬 Starting frame processing...")
@@ -381,44 +388,60 @@ def process_video_with_temp_files(input_path, output_path, model):
             
             frame_count += 1
             
-            # Skip frames if needed
-            if frame_skip > 1 and frame_count % frame_skip != 0:
+            # Skip frames to reduce processing load
+            if frame_count % frame_skip != 0:
+                # For skipped frames, just resize and write original frame
+                if frame.shape[1] != output_width or frame.shape[0] != output_height:
+                    frame_resized = cv2.resize(frame, (output_width, output_height))
+                else:
+                    frame_resized = frame
+                out.write(frame_resized)
                 continue
             
-            # Show progress
-            if frame_count == 1 or frame_count % 50 == 0:
+            # Show progress every 20 processed frames
+            if successful_frames == 0 or successful_frames % 20 == 0:
                 progress = (frame_count / total_frames) * 100
-                print(f"📹 Frame {frame_count}/{total_frames} ({progress:.1f}%)")
+                print(f"📹 Frame {frame_count}/{total_frames} ({progress:.1f}%) - AI Processed: {successful_frames}")
+                
+                # Log memory usage
+                import psutil
+                process = psutil.Process()
+                memory_mb = process.memory_info().rss / 1024 / 1024
+                print(f"🧠 Memory usage: {memory_mb:.1f} MB")
             
             try:
-                # Resize frame if needed
-                if frame.shape[1] != width or frame.shape[0] != height:
-                    frame = cv2.resize(frame, (width, height))
+                # Run YOLO prediction on ORIGINAL frame size with your trained imgsz
+                results = model.predict(frame, verbose=False, conf=0.3, imgsz=832)  # Keep your trained size
                 
-                # Run YOLO prediction on this frame
-                results = model.predict(frame, verbose=False)
-                
-                # Get the annotated frame
+                # Get the annotated frame (this will be original size)
                 annotated_frame = results[0].plot()
                 
-                # Ensure frame dimensions are correct
-                if annotated_frame.shape[:2] != (height, width):
-                    annotated_frame = cv2.resize(annotated_frame, (width, height))
+                # NOW resize the annotated frame for output to save memory
+                if annotated_frame.shape[1] != output_width or annotated_frame.shape[0] != output_height:
+                    annotated_frame = cv2.resize(annotated_frame, (output_width, output_height))
                 
                 # Write the frame to output video
                 out.write(annotated_frame)
                 successful_frames += 1
                 
+                # Force garbage collection every 30 frames to free memory
+                if successful_frames % 30 == 0:
+                    import gc
+                    gc.collect()
+                
             except Exception as frame_error:
                 print(f"⚠️ Error processing frame {frame_count}: {frame_error}")
                 # Write original frame if processing fails
-                if frame.shape[:2] != (height, width):
-                    frame = cv2.resize(frame, (width, height))
-                out.write(frame)
+                if frame.shape[1] != output_width or frame.shape[0] != output_height:
+                    frame_resized = cv2.resize(frame, (output_width, output_height))
+                else:
+                    frame_resized = frame
+                out.write(frame_resized)
         
         print(f"✅ Video processing complete!")
-        print(f"   - Total frames processed: {frame_count}")
-        print(f"   - Successful AI annotations: {successful_frames}")
+        print(f"   - Total frames: {frame_count}")
+        print(f"   - AI processed frames: {successful_frames}")
+        print(f"   - Skipped frames: {frame_count - successful_frames}")
         
     except Exception as e:
         print(f"❌ Error during video processing: {str(e)}")
@@ -429,6 +452,10 @@ def process_video_with_temp_files(input_path, output_path, model):
         cap.release()
         out.release()
         cv2.destroyAllWindows()
+        
+        # Force garbage collection
+        import gc
+        gc.collect()
     
     # Verify the output file was created
     if not os.path.exists(output_path):

@@ -13,6 +13,8 @@ import yt_dlp
 import re
 from dotenv import load_dotenv
 import logging
+import psutil
+import gc
 
 # Load environment variables
 load_dotenv()
@@ -111,10 +113,12 @@ def upload_file():
                     duration = frame_count / fps if fps > 0 else 0
                     cap.release()
                     
-                    # Limit video duration to 2 minutes for Cloud Run
-                    if duration > 120:
-                        os.unlink(temp_path)
-                        return jsonify({"error": "Video too long. Maximum duration is 2 minutes."}), 400
+                    # Limit video duration to 30 seconds for Cloud Run
+                    if duration > 30:
+                        print(f"❌ Video too long: {duration}s > 30s")
+                        if temp_path and os.path.exists(temp_path):
+                            os.unlink(temp_path)
+                        return jsonify({"error": "Video too long. Maximum duration is 30 seconds."}), 400
                     
                     print(f"📹 Video duration: {duration:.1f}s")
                 else:
