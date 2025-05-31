@@ -142,32 +142,36 @@ const FileUpload = () => {
         try {
             console.log(`📤 Uploading ${fileSizeMB.toFixed(1)}MB file to server...`);
             
-            // Dynamic timeout based on file size
+            // EXTREME timeouts for large videos
             let timeoutMs;
-            if (fileSizeMB > 50) {
-                timeoutMs = 1800000; // 30 minutes for very large files
-            } else if (fileSizeMB > 25) {
-                timeoutMs = 1200000; // 20 minutes for large files
+            if (fileSizeMB > 30) {
+                timeoutMs = 5400000; // 90 minutes for very large files
+                setMessage(`🔄 Processing very large video (${fileSizeMB.toFixed(1)}MB)... This will take 45-90 minutes. Please keep this tab open and be very patient...`);
+            } else if (fileSizeMB > 20) {
+                timeoutMs = 3600000; // 60 minutes for large files
+                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This will take 30-60 minutes. Please keep this tab open...`);
             } else if (fileSizeMB > 10) {
-                timeoutMs = 900000;  // 15 minutes for medium files
+                timeoutMs = 1800000; // 30 minutes for medium files
+                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 15-30 minutes. Please wait...`);
             } else {
-                timeoutMs = 600000;  // 10 minutes for small files
+                timeoutMs = 900000;  // 15 minutes for small files
+                setMessage('🔄 Processing video... This may take 5-15 minutes. Please wait...');
             }
+            
+            console.log(`⏱️ EXTREME timeout set to ${timeoutMs / 60000} minutes for ${fileSizeMB.toFixed(1)}MB file`);
+            console.log(`🚨 WARNING: Large video processing can take up to ${timeoutMs / 60000} minutes!`);
             
             const controller = new AbortController();
             const timeoutId = setTimeout(() => {
+                console.log(`❌ Request timed out after ${timeoutMs / 60000} minutes`);
                 controller.abort();
-                console.log('❌ Request timed out after', timeoutMs / 1000, 'seconds');
             }, timeoutMs);
             
-            console.log(`⏱️ Request timeout set to ${timeoutMs / 60000} minutes`);
-            
+            // Simplified fetch for better reliability
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
                 method: 'POST',
                 body: formData,
-                signal: controller.signal,
-                // Don't set Content-Type header - let browser handle it for FormData
-                credentials: 'omit'
+                signal: controller.signal
             });
 
             clearTimeout(timeoutId);

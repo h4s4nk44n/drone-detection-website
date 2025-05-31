@@ -112,6 +112,16 @@ def upload_file():
         
         print(f"📁 File uploaded: {file.filename} ({file_size_mb:.2f}MB)")
         
+        # Add processing time estimate
+        if file_size_mb > 30:
+            print(f"🚨 LARGE FILE ALERT: {file_size_mb:.2f}MB will take 45-90 minutes to process")
+            print("🔧 Using maximum resources for processing...")
+        elif file_size_mb > 20:
+            print(f"⚠️ Large file: {file_size_mb:.2f}MB will take 30-60 minutes to process")
+        
+        # Force garbage collection before processing
+        gc.collect()
+        
         # Get file extension
         file_ext = os.path.splitext(file.filename)[1].lower()
         
