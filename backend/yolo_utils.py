@@ -218,13 +218,13 @@ def process_file_in_memory(file_data, file_ext, filename, model):
     
     try:
         if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
-            # Video processing - output as MP4 for Cloud Run compatibility
+            # Video processing with FFmpeg fallback
             with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
                 temp_output_path = temp_output.name
             
             try:
-                # Process video
-                output_path = process_video_with_temp_files(temp_input_path, temp_output_path, model)
+                # Use FFmpeg fallback approach
+                output_path = process_video_with_ffmpeg_fallback(temp_input_path, temp_output_path, model)
                 
                 # Read processed video
                 with open(output_path, 'rb') as f:
@@ -590,6 +590,164 @@ def process_video_with_temp_files(input_path, output_path, model):
     print(f"📊 Final output: {file_size / (1024*1024):.2f} MB")
     
     return output_path
+
+def process_video_with_ffmpeg_fallback(input_path, output_path, model):
+    """
+    Process video with FFmpeg fallback when OpenCV fails
+    """
+    print(f"🎬 Attempting video processing with FFmpeg fallback...")
+    
+    # First try OpenCV approach
+    try:
+        return process_video_with_temp_files(input_path, output_path, model)
+    except Exception as opencv_error:
+        print(f"❌ OpenCV failed: {opencv_error}")
+        print(f"🔄 Falling back to FFmpeg approach...")
+        
+        # FFmpeg approach: process frames and use FFmpeg to encode
+        return process_video_with_ffmpeg(input_path, output_path, model)
+
+def process_video_with_ffmpeg(input_path, output_path, model):
+    """
+    Process video using frame extraction + FFmpeg encoding
+    """
+    print(f"🛠️ Processing video with FFmpeg...")
+    
+    # Create temp directory for frames
+    with tempfile.TemporaryDirectory() as temp_dir:
+        frames_dir = os.path.join(temp_dir, "frames")
+        os.makedirs(frames_dir, exist_ok=True)
+        
+        # Extract frames using OpenCV
+        cap = cv2.VideoCapture(input_path)
+        if not cap.isOpened():
+            raise Exception(f"Could not open video: {input_path}")
+        
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        # Target resolution
+        max_dimension = 480
+        if width > height:
+            output_width = max_dimension
+            output_height = int(height * (max_dimension / width))
+        else:
+            output_height = max_dimension
+            output_width = int(width * (max_dimension / height))
+        
+        # Ensure even dimensions for FFmpeg
+        output_width = output_width - (output_width % 2)
+        output_height = output_height - (output_height % 2)
+        
+        output_fps = min(15, fps)
+        frame_skip = max(1, fps // output_fps)
+        
+        print(f"📊 FFmpeg processing plan:")
+        print(f"   - Input: {width}x{height} @ {fps} fps")
+        print(f"   - Output: {output_width}x{output_height} @ {output_fps} fps")
+        print(f"   - Frame skip: every {frame_skip} frames")
+        
+        frame_count = 0
+        saved_frames = 0
+        
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                frame_count += 1
+                
+                # Skip frames to match target FPS
+                if frame_count % frame_skip != 0:
+                    continue
+                
+                # Resize frame
+                frame_resized = cv2.resize(frame, (output_width, output_height))
+                
+                # Run AI on this frame
+                try:
+                    if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
+                        # ONNX model
+                        detections = model.predict(frame_resized)
+                        if len(detections) > 0:
+                            processed_frame = model.draw_detections(frame_resized, detections)
+                        else:
+                            processed_frame = frame_resized
+                    else:
+                        # PyTorch model
+                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=320)
+                        processed_frame = results[0].plot()
+                    
+                    # Save frame as image
+                    frame_filename = os.path.join(frames_dir, f"frame_{saved_frames:06d}.jpg")
+                    cv2.imwrite(frame_filename, processed_frame)
+                    saved_frames += 1
+                    
+                    if saved_frames % 50 == 0:
+                        print(f"📹 Processed {saved_frames} frames...")
+                        
+                except Exception as ai_error:
+                    print(f"⚠️ AI failed on frame {frame_count}: {ai_error}")
+                    # Save original frame
+                    frame_filename = os.path.join(frames_dir, f"frame_{saved_frames:06d}.jpg")
+                    cv2.imwrite(frame_filename, frame_resized)
+                    saved_frames += 1
+        
+        finally:
+            cap.release()
+        
+        print(f"✅ Extracted and processed {saved_frames} frames")
+        
+        # Use FFmpeg to create video from frames
+        if saved_frames == 0:
+            raise Exception("No frames were processed")
+        
+        # Ensure output is MP4
+        if not output_path.endswith('.mp4'):
+            output_path = os.path.splitext(output_path)[0] + '.mp4'
+        
+        print(f"🎬 Creating MP4 video with FFmpeg...")
+        
+        # FFmpeg command to create MP4 from frames
+        ffmpeg_cmd = [
+            'ffmpeg', '-y',  # -y to overwrite output file
+            '-framerate', str(output_fps),
+            '-i', os.path.join(frames_dir, 'frame_%06d.jpg'),
+            '-c:v', 'libx264',  # H.264 codec
+            '-preset', 'fast',  # Fast encoding
+            '-crf', '28',  # Good quality/size balance
+            '-pix_fmt', 'yuv420p',  # Web compatibility
+            output_path
+        ]
+        
+        try:
+            result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                print(f"✅ FFmpeg video creation successful!")
+            else:
+                print(f"❌ FFmpeg error: {result.stderr}")
+                raise Exception(f"FFmpeg failed: {result.stderr}")
+                
+        except subprocess.TimeoutExpired:
+            raise Exception("FFmpeg encoding timed out")
+        except FileNotFoundError:
+            raise Exception("FFmpeg not found - not available on Cloud Run")
+        
+        # Verify output
+        if not os.path.exists(output_path):
+            raise Exception("FFmpeg did not create output file")
+        
+        file_size = os.path.getsize(output_path)
+        if file_size < 1024:
+            raise Exception("Output file too small")
+        
+        print(f"📊 FFmpeg output: {file_size / (1024*1024):.2f} MB")
+        
+        return output_path
 
 def process_youtube_video(youtube_url, model):
     """
