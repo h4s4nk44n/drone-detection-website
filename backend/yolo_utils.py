@@ -326,7 +326,7 @@ def process_video_in_memory(file_data, model):
 
 def process_video_with_temp_files(input_path, output_path, model):
     """
-    Process video frame by frame using temporary files
+    Process video frame by frame using temporary files - optimized for Cloud Run
     """
     print(f"🎬 Processing video with temp files...")
     
@@ -342,45 +342,36 @@ def process_video_with_temp_files(input_path, output_path, model):
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     
+    # Reduce resolution if too high to save memory
+    if width > 1280 or height > 720:
+        scale_factor = min(1280/width, 720/height)
+        width = int(width * scale_factor)
+        height = int(height * scale_factor)
+        print(f"📏 Scaling video to {width}x{height} to save memory")
+    
     print(f"📊 Video properties:")
     print(f"   - Resolution: {width}x{height}")
     print(f"   - FPS: {fps}")
     print(f"   - Total frames: {total_frames}")
     
-    # Try different codecs for WebM format
-    codecs_to_try = [
-        ('VP80', 'VP8'),  # VP8 codec for WebM
-        ('VP90', 'VP9'),  # VP9 codec for WebM
-        ('mp4v', 'MP4V'), # Fallback to MP4V
-        ('XVID', 'XVID')  # Another fallback
-    ]
+    # Use VP8 codec for better compatibility
+    fourcc = cv2.VideoWriter_fourcc(*'VP80')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
     
-    out = None
-    used_codec = None
-    
-    for codec_code, codec_name in codecs_to_try:
-        print(f"🔧 Trying {codec_name} codec...")
-        fourcc = cv2.VideoWriter_fourcc(*codec_code)
-        out = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-        
-        if out.isOpened():
-            used_codec = codec_name
-            print(f"✅ Successfully initialized video writer with {codec_name}")
-            break
-        else:
-            print(f"❌ {codec_name} codec failed")
-            if out:
-                out.release()
-    
-    if not out or not out.isOpened():
+    if not out.isOpened():
         cap.release()
         raise Exception(f"Could not create output video writer")
     
     frame_count = 0
     successful_frames = 0
     
+    # Process every nth frame to speed up processing for long videos
+    frame_skip = max(1, total_frames // 1000)  # Process max 1000 frames
+    if frame_skip > 1:
+        print(f"⚡ Processing every {frame_skip} frames to optimize performance")
+    
     try:
-        print(f"🎬 Starting frame processing with {used_codec} codec...")
+        print(f"🎬 Starting frame processing...")
         
         while True:
             ret, frame = cap.read()
@@ -390,12 +381,20 @@ def process_video_with_temp_files(input_path, output_path, model):
             
             frame_count += 1
             
+            # Skip frames if needed
+            if frame_skip > 1 and frame_count % frame_skip != 0:
+                continue
+            
             # Show progress
-            if frame_count == 1 or frame_count % 25 == 0:
+            if frame_count == 1 or frame_count % 50 == 0:
                 progress = (frame_count / total_frames) * 100
                 print(f"📹 Frame {frame_count}/{total_frames} ({progress:.1f}%)")
             
             try:
+                # Resize frame if needed
+                if frame.shape[1] != width or frame.shape[0] != height:
+                    frame = cv2.resize(frame, (width, height))
+                
                 # Run YOLO prediction on this frame
                 results = model.predict(frame, verbose=False)
                 
@@ -420,7 +419,6 @@ def process_video_with_temp_files(input_path, output_path, model):
         print(f"✅ Video processing complete!")
         print(f"   - Total frames processed: {frame_count}")
         print(f"   - Successful AI annotations: {successful_frames}")
-        print(f"   - Output codec: {used_codec}")
         
     except Exception as e:
         print(f"❌ Error during video processing: {str(e)}")

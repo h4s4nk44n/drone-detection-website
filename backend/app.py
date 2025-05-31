@@ -18,7 +18,9 @@ import logging
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=["https://drone-detection-website.vercel.app"])
+CORS(app, origins=["https://drone-detection-website.vercel.app", "https://*.vercel.app"], 
+     allow_headers=["Content-Type", "Authorization"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 
 # Disable all debug features
 app.config['DEBUG'] = False
@@ -85,12 +87,45 @@ def upload_file():
         file_size = len(file_data)
         print(f"📊 File size: {file_size / (1024*1024):.2f} MB")
         
-        # Check file size limit
-        if file_size > 100 * 1024 * 1024:  # 100MB limit
-            return jsonify({"error": "File too large. Maximum size is 100MB."}), 400
+        # Check file size limit - reduce for videos
+        max_size = 50 * 1024 * 1024 if file.filename.lower().endswith('.mp4') else 100 * 1024 * 1024
+        if file_size > max_size:
+            return jsonify({"error": f"File too large. Maximum size is {max_size/(1024*1024):.0f}MB for videos."}), 400
         
         # Get file extension
         file_ext = os.path.splitext(file.filename)[1].lower()
+        
+        # For videos, add early validation
+        if file_ext == '.mp4':
+            # Quick video duration check using OpenCV
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_file:
+                temp_file.write(file_data)
+                temp_path = temp_file.name
+            
+            try:
+                cap = cv2.VideoCapture(temp_path)
+                if cap.isOpened():
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    duration = frame_count / fps if fps > 0 else 0
+                    cap.release()
+                    
+                    # Limit video duration to 2 minutes for Cloud Run
+                    if duration > 120:
+                        os.unlink(temp_path)
+                        return jsonify({"error": "Video too long. Maximum duration is 2 minutes."}), 400
+                    
+                    print(f"📹 Video duration: {duration:.1f}s")
+                else:
+                    os.unlink(temp_path)
+                    return jsonify({"error": "Invalid video file"}), 400
+                    
+                os.unlink(temp_path)
+            except Exception as e:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
+                return jsonify({"error": f"Video validation failed: {str(e)}"}), 400
         
         # Process with YOLO in memory
         print("🤖 Starting YOLO processing...")
@@ -160,9 +195,9 @@ def process_youtube():
         return jsonify({"error": f"YouTube processing failed: {str(e)}"}), 500
 
 if __name__ == '__main__':
-    # Get port from environment (Render sets PORT automatically)
-    port = int(os.environ.get('PORT', os.getenv('FLASK_PORT', 5001)))
-    host = os.getenv('FLASK_HOST', '0.0.0.0')  # Important: use 0.0.0.0 for Render
+    # Get port from environment (Google Cloud Run sets PORT automatically)
+    port = int(os.environ.get('PORT', 8080))  # Changed default to 8080
+    host = os.getenv('FLASK_HOST', '0.0.0.0')
     
     print("🚀 Starting Flask server...")
     print(f"📍 Host: {host}")
