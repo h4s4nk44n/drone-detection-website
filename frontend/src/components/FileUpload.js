@@ -98,6 +98,7 @@ const FileUpload = () => {
     const downloadFileInChunks = async (fileInfo, fileType) => {
         try {
             console.log(`📥 Starting chunked download: ${fileInfo.chunks} chunks (${(fileInfo.size / (1024*1024)).toFixed(2)}MB)`);
+            console.log(`📋 File info:`, fileInfo);
             setMessage(`📥 Downloading ${fileType} result in ${fileInfo.chunks} chunks...`);
             
             const chunks = [];
@@ -106,25 +107,76 @@ const FileUpload = () => {
             for (let i = 0; i < fileInfo.chunks; i++) {
                 setMessage(`📥 Downloading ${fileType} chunk ${i + 1}/${fileInfo.chunks}...`);
                 
-                const response = await fetch(`https://drone-detection-686868741947.europe-west1.run.app/api/download-chunk/${fileInfo.file_id}/${i}`, {
-                    method: 'GET'
-                });
+                const chunkUrl = `https://drone-detection-686868741947.europe-west1.run.app/api/download-chunk/${fileInfo.file_id}/${i}`;
+                console.log(`📡 Requesting chunk ${i + 1} from: ${chunkUrl}`);
                 
-                if (!response.ok) {
-                    throw new Error(`Failed to download chunk ${i + 1}`);
+                try {
+                    const response = await fetch(chunkUrl, {
+                        method: 'GET',
+                        mode: 'cors',
+                        headers: {
+                            'Accept': 'application/json',
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    
+                    console.log(`📡 Chunk ${i + 1} response status:`, response.status);
+                    console.log(`📡 Chunk ${i + 1} response headers:`, [...response.headers.entries()]);
+                    
+                    if (!response.ok) {
+                        // Try to get error details
+                        let errorMessage;
+                        try {
+                            const errorData = await response.json();
+                            errorMessage = errorData.error || `HTTP ${response.status}`;
+                            console.error(`❌ Chunk ${i + 1} error data:`, errorData);
+                        } catch (parseError) {
+                            console.error(`❌ Failed to parse chunk ${i + 1} error:`, parseError);
+                            const errorText = await response.text();
+                            errorMessage = errorText || `HTTP ${response.status}`;
+                            console.error(`❌ Chunk ${i + 1} error text:`, errorText);
+                        }
+                        throw new Error(`Failed to download chunk ${i + 1}: ${errorMessage}`);
+                    }
+                    
+                    const chunkData = await response.json();
+                    console.log(`📦 Chunk ${i + 1} data received:`, {
+                        chunk_index: chunkData.chunk_index,
+                        total_chunks: chunkData.total_chunks,
+                        chunk_size: chunkData.chunk_size,
+                        data_length: chunkData.chunk_data ? chunkData.chunk_data.length : 0
+                    });
+                    
+                    if (!chunkData.chunk_data) {
+                        throw new Error(`Chunk ${i + 1} has no data`);
+                    }
+                    
+                    // Convert base64 back to binary
+                    try {
+                        const binaryString = atob(chunkData.chunk_data);
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let j = 0; j < binaryString.length; j++) {
+                            bytes[j] = binaryString.charCodeAt(j);
+                        }
+                        
+                        chunks.push(bytes);
+                        console.log(`📦 Successfully processed chunk ${i + 1}: ${bytes.length} bytes`);
+                        
+                    } catch (decodeError) {
+                        console.error(`❌ Failed to decode chunk ${i + 1}:`, decodeError);
+                        throw new Error(`Failed to decode chunk ${i + 1}: ${decodeError.message}`);
+                    }
+                    
+                } catch (fetchError) {
+                    console.error(`❌ Network error for chunk ${i + 1}:`, fetchError);
+                    
+                    // Check if it's a CORS error
+                    if (fetchError.message.includes('CORS') || fetchError.message.includes('NetworkError')) {
+                        throw new Error(`CORS/Network error on chunk ${i + 1}. Server may not be responding properly.`);
+                    }
+                    
+                    throw fetchError; // Re-throw other errors
                 }
-                
-                const chunkData = await response.json();
-                
-                // Convert base64 back to binary
-                const binaryString = atob(chunkData.chunk_data);
-                const bytes = new Uint8Array(binaryString.length);
-                for (let j = 0; j < binaryString.length; j++) {
-                    bytes[j] = binaryString.charCodeAt(j);
-                }
-                
-                chunks.push(bytes);
-                console.log(`📦 Downloaded chunk ${i + 1}: ${bytes.length} bytes`);
             }
             
             // Combine all chunks
@@ -146,10 +198,22 @@ const FileUpload = () => {
             
             // Cleanup server file
             try {
-                await fetch(`https://drone-detection-686868741947.europe-west1.run.app/api/cleanup-download/${fileInfo.file_id}`, {
-                    method: 'POST'
+                const cleanupUrl = `https://drone-detection-686868741947.europe-west1.run.app/api/cleanup-download/${fileInfo.file_id}`;
+                console.log(`🧹 Cleaning up server file: ${cleanupUrl}`);
+                
+                const cleanupResponse = await fetch(cleanupUrl, {
+                    method: 'POST',
+                    mode: 'cors',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
                 });
-                console.log(`🧹 Cleaned up server file: ${fileInfo.file_id}`);
+                
+                if (cleanupResponse.ok) {
+                    console.log(`🧹 Cleaned up server file: ${fileInfo.file_id}`);
+                } else {
+                    console.warn(`⚠️ Cleanup failed for ${fileInfo.file_id}:`, cleanupResponse.status);
+                }
             } catch (cleanupError) {
                 console.warn('⚠️ Failed to cleanup server file:', cleanupError);
             }
@@ -158,6 +222,17 @@ const FileUpload = () => {
             
         } catch (error) {
             console.error(`❌ Chunked download failed for ${fileType}:`, error);
+            
+            // Add debug info
+            console.log('🔍 Debug info for failed download:');
+            console.log('   - File info:', fileInfo);
+            console.log('   - Chunks downloaded:', chunks?.length || 0);
+            console.log('   - Error details:', {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+            });
+            
             throw error;
         }
     };

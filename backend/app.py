@@ -512,31 +512,69 @@ def process_uploaded():
 def download_chunk(file_id, chunk_index):
     """Download a specific chunk of a processed file"""
     try:
+        print(f"📥 Download request: file_id={file_id}, chunk={chunk_index}")
+        
         if file_id not in temp_files:
-            return jsonify({"error": "File not found or expired"}), 404
+            print(f"❌ File not found in temp_files: {file_id}")
+            print(f"📋 Available files: {list(temp_files.keys())}")
+            response = jsonify({"error": "File not found or expired"})
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response, 404
         
         file_info = temp_files[file_id]
         file_path = file_info['path']
         
+        print(f"📁 File info: {file_info}")
+        
         if not os.path.exists(file_path):
+            print(f"❌ File not found on disk: {file_path}")
             # Clean up missing file from tracking
             del temp_files[file_id]
-            return jsonify({"error": "File not found on disk"}), 404
+            response = jsonify({"error": "File not found on disk"})
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response, 404
         
         if chunk_index >= file_info['chunks']:
-            return jsonify({"error": "Chunk index out of range"}), 400
+            print(f"❌ Chunk index out of range: {chunk_index} >= {file_info['chunks']}")
+            response = jsonify({"error": "Chunk index out of range"})
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response, 400
         
         CHUNK_SIZE = 5 * 1024 * 1024  # 5MB chunks
         start_byte = chunk_index * CHUNK_SIZE
         end_byte = min(start_byte + CHUNK_SIZE, file_info['size'])
         
+        print(f"📦 Reading chunk {chunk_index}: bytes {start_byte}-{end_byte}")
+        
         # Read chunk from file
-        with open(file_path, 'rb') as f:
-            f.seek(start_byte)
-            chunk_data = f.read(end_byte - start_byte)
+        try:
+            with open(file_path, 'rb') as f:
+                f.seek(start_byte)
+                chunk_data = f.read(end_byte - start_byte)
+        except Exception as read_error:
+            print(f"❌ Error reading file: {str(read_error)}")
+            response = jsonify({"error": f"Failed to read file: {str(read_error)}"})
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response, 500
         
         # Return chunk as base64 in JSON (small enough for individual responses)
-        chunk_base64 = base64.b64encode(chunk_data).decode('utf-8')
+        try:
+            chunk_base64 = base64.b64encode(chunk_data).decode('utf-8')
+        except Exception as encode_error:
+            print(f"❌ Error encoding chunk: {str(encode_error)}")
+            response = jsonify({"error": f"Failed to encode chunk: {str(encode_error)}"})
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response, 500
         
         print(f"📦 Serving chunk {chunk_index}/{file_info['chunks']} for {file_id}: {len(chunk_data)} bytes")
         
@@ -548,28 +586,104 @@ def download_chunk(file_id, chunk_index):
             "mime_type": file_info['mime_type']
         }
         
-        return jsonify(response_data)
+        response = jsonify(response_data)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response
         
     except Exception as e:
-        print(f"❌ Error serving chunk {chunk_index} for {file_id}: {str(e)}")
-        return jsonify({"error": f"Failed to serve chunk: {str(e)}"}), 500
+        print(f"❌ Unexpected error serving chunk {chunk_index} for {file_id}: {str(e)}")
+        traceback.print_exc()
+        response = jsonify({"error": f"Failed to serve chunk: {str(e)}"})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response, 500
 
 @app.route('/api/cleanup-download/<file_id>', methods=['POST'])
 def cleanup_download(file_id):
     """Clean up a temporary download file"""
     try:
+        print(f"🧹 Cleanup request for file: {file_id}")
+        
         if file_id in temp_files:
             file_info = temp_files[file_id]
             if os.path.exists(file_info['path']):
                 os.unlink(file_info['path'])
+                print(f"🧹 Deleted file: {file_info['path']}")
             del temp_files[file_id]
             print(f"🧹 Manual cleanup of download file: {file_id}")
-            return jsonify({"message": "File cleaned up successfully"})
+            
+            response = jsonify({"message": "File cleaned up successfully"})
         else:
-            return jsonify({"message": "File not found or already cleaned up"})
+            print(f"⚠️ File not found for cleanup: {file_id}")
+            response = jsonify({"message": "File not found or already cleaned up"})
+        
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response
+        
     except Exception as e:
         print(f"❌ Cleanup error for {file_id}: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        traceback.print_exc()
+        response = jsonify({"error": str(e)})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response, 500
+
+# Add explicit OPTIONS handlers for the new endpoints
+@app.route('/api/download-chunk/<file_id>/<int:chunk_index>', methods=['OPTIONS'])
+def download_chunk_options(file_id, chunk_index):
+    """Handle OPTIONS request for download-chunk endpoint"""
+    response = make_response()
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+@app.route('/api/cleanup-download/<file_id>', methods=['OPTIONS'])
+def cleanup_download_options(file_id):
+    """Handle OPTIONS request for cleanup-download endpoint"""
+    response = make_response()
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
+
+# Add a debug endpoint to check temp files
+@app.route('/api/debug/temp-files', methods=['GET'])
+def debug_temp_files():
+    """Debug endpoint to check temp files status"""
+    try:
+        debug_info = {
+            "temp_files_count": len(temp_files),
+            "temp_files": {}
+        }
+        
+        for file_id, file_info in temp_files.items():
+            debug_info["temp_files"][file_id] = {
+                "size": file_info['size'],
+                "chunks": file_info['chunks'],
+                "exists": os.path.exists(file_info['path']),
+                "path": file_info['path'],
+                "created": file_info['created'],
+                "age_seconds": time.time() - file_info['created']
+            }
+        
+        response = jsonify(debug_info)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response
+        
+    except Exception as e:
+        print(f"❌ Debug endpoint error: {str(e)}")
+        response = jsonify({"error": str(e)})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response, 500
 
 if __name__ == '__main__':
     # Get port from environment (Google Cloud Run sets PORT automatically)
