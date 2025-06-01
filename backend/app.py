@@ -937,34 +937,42 @@ def debug_temp_files():
 def extract_training_data():
     """Extract YOLO format training data from uploaded file"""
     try:
-        print("🎯 Training data extraction endpoint reached")
+        print("🎯 === TRAINING DATA EXTRACTION ENDPOINT REACHED ===")
         
         # Cleanup old files first
         cleanup_old_files()
         
         if 'file' not in request.files:
+            print("❌ No file in request")
             return jsonify({"error": "No file uploaded"}), 400
         
         file = request.files['file']
         if file.filename == '':
+            print("❌ Empty filename")
             return jsonify({"error": "No file selected"}), 400
+        
+        print(f"📁 File received: {file.filename}")
         
         # Read file data
         file_data = file.read()
         file_size_mb = len(file_data) / (1024 * 1024)
+        print(f"📊 File size: {file_size_mb:.2f}MB")
         
         # File size check
         if file_size_mb > 100:  # Increased limit for training data extraction
+            print(f"❌ File too large: {file_size_mb:.2f}MB")
             return jsonify({"error": f"File too large. Maximum size is 100MB for training data extraction."}), 400
         
         print(f"📁 File uploaded for training extraction: {file.filename} ({file_size_mb:.2f}MB)")
         
         # Get file extension
         file_ext = os.path.splitext(file.filename)[1].lower()
+        print(f"📋 File extension: {file_ext}")
         
         # File type validation
         allowed_extensions = {'.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.webm'}
         if file_ext not in allowed_extensions:
+            print(f"❌ Unsupported file type: {file_ext}")
             return jsonify({"error": f"Unsupported file type: {file_ext}"}), 400
         
         # Get confidence threshold from request (optional)
@@ -972,10 +980,11 @@ def extract_training_data():
         if confidence_threshold < 0.1 or confidence_threshold > 0.9:
             confidence_threshold = 0.3
         
-        print(f"🎯 Extracting training data with confidence threshold: {confidence_threshold}")
+        print(f"🎯 Confidence threshold: {confidence_threshold}")
+        print(f"🎯 Starting training data extraction...")
         
         # Process file and extract training data using the existing processing function
-        print("🤖 Starting processing with training data extraction...")
+        print("🤖 Calling process_file_in_memory with training data extraction enabled...")
         
         try:
             # Use the modified process_file_in_memory with training data extraction enabled
@@ -985,22 +994,49 @@ def extract_training_data():
                 confidence_threshold=confidence_threshold
             )
             
+            print(f"✅ process_file_in_memory completed successfully")
+            print(f"📊 Result type: {type(result)}")
+            print(f"📊 Result length: {len(result) if hasattr(result, '__len__') else 'N/A'}")
+            
             # Unpack the result
             if len(result) == 5:  # With training data
                 original_base64, processed_base64, mime_type, zip_data, extracted_count = result
+                print(f"🎯 Training data extracted: {extracted_count} samples")
+                print(f"📦 ZIP data size: {len(zip_data) if zip_data else 0} bytes")
             else:  # No training data extracted
                 original_base64, processed_base64, mime_type = result
                 zip_data = None
                 extracted_count = 0
+                print(f"⚠️ No training data in result - only {len(result)} elements returned")
+            
+            print(f"📋 Final extracted count: {extracted_count}")
             
             if extracted_count == 0:
-                return jsonify({
-                    "error": "No drone detections found in the uploaded file. Training data extraction requires files with visible drones.",
-                    "suggestion": "Try uploading a different file that contains drones, or lower the confidence threshold.",
-                    "confidence_used": confidence_threshold
-                }), 400
+                print(f"⚠️ No training data extracted - preparing detailed error response")
+                # Enhanced error message with debugging info
+                debug_info = {
+                    "error": "No drone detections found meeting the confidence criteria.",
+                    "debug_info": {
+                        "confidence_threshold_used": confidence_threshold,
+                        "file_type": file_ext,
+                        "file_size_mb": round(file_size_mb, 2),
+                        "processing_notes": [
+                            "Model uses conf=0.1 to find all detections",
+                            f"Then filters by your threshold: {confidence_threshold}",
+                            "Check server logs for detailed detection info per frame"
+                        ]
+                    },
+                    "suggestions": [
+                        "Try a lower confidence threshold (e.g., 0.1 or 0.2)",
+                        "Ensure the video contains clearly visible drones",
+                        "Check that the drone is not too small in the frame",
+                        "Verify the video quality is good enough for detection"
+                    ]
+                }
+                print(f"❌ Returning 400 error with debug info")
+                return jsonify(debug_info), 400
             
-            print(f"✅ Training data extraction complete: {extracted_count} samples")
+            print(f"✅ Training data extraction will proceed with {extracted_count} samples")
             
             # Convert ZIP to base64 for download
             zip_base64 = base64.b64encode(zip_data).decode('utf-8')
@@ -1015,7 +1051,11 @@ def extract_training_data():
             })
             
         except Exception as processing_error:
-            print(f"❌ Training data extraction failed: {str(processing_error)}")
+            print(f"❌ process_file_in_memory threw an exception: {str(processing_error)}")
+            print(f"❌ Exception type: {type(processing_error).__name__}")
+            import traceback
+            print(f"❌ Full traceback:")
+            traceback.print_exc()
             
             # Enhanced error messages
             error_msg = str(processing_error)
