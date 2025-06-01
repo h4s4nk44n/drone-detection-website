@@ -102,79 +102,105 @@ const FileUpload = () => {
             
             const chunks = [];
             
-            // Download all chunks
+            // Download all chunks with retry logic
             for (let i = 0; i < fileInfo.chunks; i++) {
                 setMessage(`📥 Downloading ${fileType} chunk ${i + 1}/${fileInfo.chunks}...`);
                 
                 const chunkUrl = `https://drone-detection-686868741947.europe-west1.run.app/api/download-chunk/${fileInfo.file_id}/${i}`;
                 console.log(`📡 Requesting chunk ${i + 1} from: ${chunkUrl}`);
                 
-                try {
-                    const response = await fetch(chunkUrl, {
-                        method: 'GET',
-                        mode: 'cors',
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json'
-                        }
-                    });
-                    
-                    console.log(`📡 Chunk ${i + 1} response status:`, response.status);
-                    console.log(`📡 Chunk ${i + 1} response headers:`, [...response.headers.entries()]);
-                    
-                    if (!response.ok) {
-                        // Try to get error details
-                        let errorMessage;
-                        try {
-                            const errorData = await response.json();
-                            errorMessage = errorData.error || `HTTP ${response.status}`;
-                            console.error(`❌ Chunk ${i + 1} error data:`, errorData);
-                        } catch (parseError) {
-                            console.error(`❌ Failed to parse chunk ${i + 1} error:`, parseError);
-                            const errorText = await response.text();
-                            errorMessage = errorText || `HTTP ${response.status}`;
-                            console.error(`❌ Chunk ${i + 1} error text:`, errorText);
-                        }
-                        throw new Error(`Failed to download chunk ${i + 1}: ${errorMessage}`);
-                    }
-                    
-                    const chunkData = await response.json();
-                    console.log(`📦 Chunk ${i + 1} data received:`, {
-                        chunk_index: chunkData.chunk_index,
-                        total_chunks: chunkData.total_chunks,
-                        chunk_size: chunkData.chunk_size,
-                        data_length: chunkData.chunk_data ? chunkData.chunk_data.length : 0
-                    });
-                    
-                    if (!chunkData.chunk_data) {
-                        throw new Error(`Chunk ${i + 1} has no data`);
-                    }
-                    
-                    // Convert base64 back to binary
+                // Retry logic for each chunk
+                let retryCount = 0;
+                const maxRetries = 3;
+                let chunkSuccess = false;
+                
+                while (!chunkSuccess && retryCount < maxRetries) {
                     try {
-                        const binaryString = atob(chunkData.chunk_data);
-                        const bytes = new Uint8Array(binaryString.length);
-                        for (let j = 0; j < binaryString.length; j++) {
-                            bytes[j] = binaryString.charCodeAt(j);
+                        if (retryCount > 0) {
+                            console.log(`🔄 Retry ${retryCount}/${maxRetries} for chunk ${i + 1}`);
+                            setMessage(`📥 Retrying ${fileType} chunk ${i + 1}/${fileInfo.chunks} (attempt ${retryCount + 1})...`);
+                            // Add delay before retry
+                            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
                         }
                         
-                        chunks.push(bytes);
-                        console.log(`📦 Successfully processed chunk ${i + 1}: ${bytes.length} bytes`);
+                        const response = await fetch(chunkUrl, {
+                            method: 'GET',
+                            mode: 'cors',
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json'
+                            }
+                        });
                         
-                    } catch (decodeError) {
-                        console.error(`❌ Failed to decode chunk ${i + 1}:`, decodeError);
-                        throw new Error(`Failed to decode chunk ${i + 1}: ${decodeError.message}`);
+                        console.log(`📡 Chunk ${i + 1} response status:`, response.status);
+                        console.log(`📡 Chunk ${i + 1} response headers:`, [...response.headers.entries()]);
+                        
+                        if (!response.ok) {
+                            // Try to get error details
+                            let errorMessage;
+                            try {
+                                const errorData = await response.json();
+                                errorMessage = errorData.error || `HTTP ${response.status}`;
+                                console.error(`❌ Chunk ${i + 1} error data:`, errorData);
+                            } catch (parseError) {
+                                console.error(`❌ Failed to parse chunk ${i + 1} error:`, parseError);
+                                const errorText = await response.text();
+                                errorMessage = errorText || `HTTP ${response.status}`;
+                                console.error(`❌ Chunk ${i + 1} error text:`, errorText);
+                            }
+                            throw new Error(`Failed to download chunk ${i + 1}: ${errorMessage}`);
+                        }
+                        
+                        const chunkData = await response.json();
+                        console.log(`📦 Chunk ${i + 1} data received:`, {
+                            chunk_index: chunkData.chunk_index,
+                            total_chunks: chunkData.total_chunks,
+                            chunk_size: chunkData.chunk_size,
+                            data_length: chunkData.chunk_data ? chunkData.chunk_data.length : 0
+                        });
+                        
+                        if (!chunkData.chunk_data) {
+                            throw new Error(`Chunk ${i + 1} has no data`);
+                        }
+                        
+                        // Convert base64 back to binary
+                        try {
+                            const binaryString = atob(chunkData.chunk_data);
+                            const bytes = new Uint8Array(binaryString.length);
+                            for (let j = 0; j < binaryString.length; j++) {
+                                bytes[j] = binaryString.charCodeAt(j);
+                            }
+                            
+                            chunks.push(bytes);
+                            console.log(`📦 Successfully processed chunk ${i + 1}: ${bytes.length} bytes`);
+                            chunkSuccess = true; // Mark as successful
+                            
+                        } catch (decodeError) {
+                            console.error(`❌ Failed to decode chunk ${i + 1}:`, decodeError);
+                            throw new Error(`Failed to decode chunk ${i + 1}: ${decodeError.message}`);
+                        }
+                        
+                    } catch (fetchError) {
+                        retryCount++;
+                        console.error(`❌ Network error for chunk ${i + 1} (attempt ${retryCount}):`, fetchError);
+                        
+                        if (retryCount >= maxRetries) {
+                            // Check if it's a CORS error
+                            if (fetchError.message.includes('CORS') || fetchError.message.includes('NetworkError')) {
+                                throw new Error(`CORS/Network error on chunk ${i + 1} after ${maxRetries} attempts. Server may not be responding properly.`);
+                            }
+                            
+                            throw new Error(`Failed to download chunk ${i + 1} after ${maxRetries} attempts: ${fetchError.message}`);
+                        }
+                        
+                        // Log retry attempt
+                        console.log(`⏳ Will retry chunk ${i + 1} in ${retryCount} seconds...`);
                     }
-                    
-                } catch (fetchError) {
-                    console.error(`❌ Network error for chunk ${i + 1}:`, fetchError);
-                    
-                    // Check if it's a CORS error
-                    if (fetchError.message.includes('CORS') || fetchError.message.includes('NetworkError')) {
-                        throw new Error(`CORS/Network error on chunk ${i + 1}. Server may not be responding properly.`);
-                    }
-                    
-                    throw fetchError; // Re-throw other errors
+                }
+                
+                // Add small delay between chunks to avoid overwhelming the server
+                if (i < fileInfo.chunks - 1) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
                 }
             }
             

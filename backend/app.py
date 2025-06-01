@@ -42,13 +42,24 @@ app.config['PERMANENT_SESSION_LIFETIME'] = 1800  # 30 minutes
 # Dictionary to track temporary files
 temp_files = {}
 
+# Track files currently being downloaded to prevent cleanup
+active_downloads = set()
+
 def cleanup_old_files():
-    """Clean up files older than 1 hour"""
+    """Clean up files older than 2 hours (increased from 1 hour for chunked downloads)"""
     current_time = time.time()
     expired_files = []
     
     for file_id, file_info in temp_files.items():
-        if current_time - file_info['created'] > 3600:  # 1 hour
+        # Don't cleanup files currently being downloaded
+        if file_id in active_downloads:
+            print(f"⏳ Skipping cleanup of active download: {file_id}")
+            continue
+            
+        # Increased cleanup time to 2 hours to prevent issues with large chunked downloads
+        # Also check last_accessed time to keep recently used files
+        last_access = file_info.get('last_accessed', file_info['created'])
+        if current_time - last_access > 7200:  # 2 hours since last access
             expired_files.append(file_id)
     
     for file_id in expired_files:
@@ -186,7 +197,8 @@ def upload_file():
                 'size': original_size,
                 'chunks': original_chunks,
                 'mime_type': mime_type,
-                'created': time.time()
+                'created': time.time(),
+                'last_accessed': time.time()
             }
             
             temp_files[processed_file_id] = {
@@ -194,7 +206,8 @@ def upload_file():
                 'size': processed_size,
                 'chunks': processed_chunks,
                 'mime_type': mime_type,
-                'created': time.time()
+                'created': time.time(),
+                'last_accessed': time.time()
             }
             
             print(f"📊 Created chunked downloads:")
@@ -448,7 +461,8 @@ def process_uploaded():
             'size': original_size,
             'chunks': original_chunks,
             'mime_type': mime_type,
-            'created': time.time()
+            'created': time.time(),
+            'last_accessed': time.time()
         }
         
         temp_files[processed_file_id] = {
@@ -456,7 +470,8 @@ def process_uploaded():
             'size': processed_size,
             'chunks': processed_chunks,
             'mime_type': mime_type,
-            'created': time.time()
+            'created': time.time(),
+            'last_accessed': time.time()
         }
         
         print(f"📊 Created chunked downloads:")
@@ -513,10 +528,16 @@ def download_chunk(file_id, chunk_index):
     """Download a specific chunk of a processed file"""
     try:
         print(f"📥 Download request: file_id={file_id}, chunk={chunk_index}")
+        print(f"📊 Current temp_files count: {len(temp_files)}")
+        
+        # Mark file as actively being downloaded
+        active_downloads.add(file_id)
         
         if file_id not in temp_files:
             print(f"❌ File not found in temp_files: {file_id}")
             print(f"📋 Available files: {list(temp_files.keys())}")
+            # Remove from active downloads since it failed
+            active_downloads.discard(file_id)
             response = jsonify({"error": "File not found or expired"})
             response.headers['Access-Control-Allow-Origin'] = '*'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
@@ -526,12 +547,25 @@ def download_chunk(file_id, chunk_index):
         file_info = temp_files[file_id]
         file_path = file_info['path']
         
-        print(f"📁 File info: {file_info}")
+        # Update last accessed time to prevent cleanup
+        temp_files[file_id]['last_accessed'] = time.time()
+        
+        print(f"📁 File info: path={file_path}, size={file_info['size']}, chunks={file_info['chunks']}")
+        print(f"📁 File age: {time.time() - file_info['created']:.1f} seconds")
         
         if not os.path.exists(file_path):
             print(f"❌ File not found on disk: {file_path}")
-            # Clean up missing file from tracking
+            print(f"📂 Checking temp directory: {os.path.dirname(file_path)}")
+            try:
+                temp_files_on_disk = os.listdir(os.path.dirname(file_path))
+                related_files = [f for f in temp_files_on_disk if file_id[:8] in f]
+                print(f"📋 Related files on disk: {related_files}")
+            except Exception as list_error:
+                print(f"⚠️ Could not list temp directory: {list_error}")
+            
+            # Clean up missing file from tracking and active downloads
             del temp_files[file_id]
+            active_downloads.discard(file_id)
             response = jsonify({"error": "File not found on disk"})
             response.headers['Access-Control-Allow-Origin'] = '*'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
@@ -540,6 +574,8 @@ def download_chunk(file_id, chunk_index):
         
         if chunk_index >= file_info['chunks']:
             print(f"❌ Chunk index out of range: {chunk_index} >= {file_info['chunks']}")
+            # Remove from active downloads
+            active_downloads.discard(file_id)
             response = jsonify({"error": "Chunk index out of range"})
             response.headers['Access-Control-Allow-Origin'] = '*'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
@@ -549,16 +585,51 @@ def download_chunk(file_id, chunk_index):
         CHUNK_SIZE = 5 * 1024 * 1024  # 5MB chunks
         start_byte = chunk_index * CHUNK_SIZE
         end_byte = min(start_byte + CHUNK_SIZE, file_info['size'])
+        expected_chunk_size = end_byte - start_byte
         
-        print(f"📦 Reading chunk {chunk_index}: bytes {start_byte}-{end_byte}")
+        print(f"📦 Reading chunk {chunk_index}: bytes {start_byte}-{end_byte} (expecting {expected_chunk_size} bytes)")
         
-        # Read chunk from file
+        # Check file size on disk before reading
         try:
+            actual_file_size = os.path.getsize(file_path)
+            print(f"📏 File size on disk: {actual_file_size} bytes (expected: {file_info['size']})")
+            
+            if actual_file_size != file_info['size']:
+                print(f"⚠️ File size mismatch! Expected {file_info['size']}, got {actual_file_size}")
+                
+        except Exception as size_error:
+            print(f"❌ Could not get file size: {size_error}")
+            # Remove from active downloads
+            active_downloads.discard(file_id)
+            response = jsonify({"error": f"Could not access file: {str(size_error)}"})
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+            return response, 500
+        
+        # Read chunk from file with better error handling
+        try:
+            print(f"🔍 Opening file for reading: {file_path}")
             with open(file_path, 'rb') as f:
+                print(f"📖 Seeking to position {start_byte}")
                 f.seek(start_byte)
-                chunk_data = f.read(end_byte - start_byte)
+                print(f"📖 Reading {expected_chunk_size} bytes")
+                chunk_data = f.read(expected_chunk_size)
+                actual_read = len(chunk_data)
+                print(f"📖 Successfully read {actual_read} bytes (expected {expected_chunk_size})")
+                
+                if actual_read != expected_chunk_size:
+                    print(f"⚠️ Read size mismatch! Expected {expected_chunk_size}, got {actual_read}")
+                    if actual_read == 0:
+                        raise Exception(f"No data read from file at position {start_byte}")
+                
         except Exception as read_error:
             print(f"❌ Error reading file: {str(read_error)}")
+            print(f"❌ Error type: {type(read_error).__name__}")
+            import traceback
+            traceback.print_exc()
+            # Remove from active downloads
+            active_downloads.discard(file_id)
             response = jsonify({"error": f"Failed to read file: {str(read_error)}"})
             response.headers['Access-Control-Allow-Origin'] = '*'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
@@ -567,16 +638,23 @@ def download_chunk(file_id, chunk_index):
         
         # Return chunk as base64 in JSON (small enough for individual responses)
         try:
+            print(f"🔄 Encoding {len(chunk_data)} bytes to base64")
             chunk_base64 = base64.b64encode(chunk_data).decode('utf-8')
+            base64_length = len(chunk_base64)
+            print(f"✅ Encoded to {base64_length} base64 characters")
+            
         except Exception as encode_error:
             print(f"❌ Error encoding chunk: {str(encode_error)}")
+            # Remove from active downloads
+            active_downloads.discard(file_id)
             response = jsonify({"error": f"Failed to encode chunk: {str(encode_error)}"})
             response.headers['Access-Control-Allow-Origin'] = '*'
             response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
             response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
             return response, 500
         
-        print(f"📦 Serving chunk {chunk_index}/{file_info['chunks']} for {file_id}: {len(chunk_data)} bytes")
+        print(f"📦 Successfully serving chunk {chunk_index}/{file_info['chunks']} for {file_id}")
+        print(f"📊 Chunk stats: {len(chunk_data)} bytes, base64: {len(chunk_base64)} chars")
         
         response_data = {
             "chunk_index": chunk_index,
@@ -590,11 +668,21 @@ def download_chunk(file_id, chunk_index):
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        
+        # Only remove from active downloads if this was the last chunk
+        if chunk_index == file_info['chunks'] - 1:
+            print(f"📋 Last chunk for {file_id}, removing from active downloads")
+            active_downloads.discard(file_id)
+        
         return response
         
     except Exception as e:
         print(f"❌ Unexpected error serving chunk {chunk_index} for {file_id}: {str(e)}")
+        print(f"❌ Error type: {type(e).__name__}")
+        import traceback
         traceback.print_exc()
+        # Always remove from active downloads on error
+        active_downloads.discard(file_id)
         response = jsonify({"error": f"Failed to serve chunk: {str(e)}"})
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
