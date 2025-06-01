@@ -211,6 +211,7 @@ def process_video_manual(input_path, output_path, model):
 def process_file_in_memory(file_data, file_ext, filename, model):
     """
     Process file in memory with proper MIME types for web compatibility
+    Enhanced with FFmpeg fallback for reliable video processing
     """
     print(f"🔄 Processing file in memory: {filename}")
     
@@ -235,6 +236,7 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration = total_frames / fps if fps > 0 else 0
+            cap.release()  # Release early to free memory
             
             print(f"📹 Video info:")
             print(f"   - Resolution: {width}x{height}")
@@ -261,77 +263,125 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             print(f"   - Output: {output_width}x{output_height} @ {target_fps}fps")
             print(f"   - Scaling: {width}x{height} -> {output_width}x{output_height}")
             
-            # Initialize video writer with H.264 codec
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(temp_output_path, fourcc, target_fps, (output_width, output_height))
-            
-            if not out.isOpened():
-                raise Exception("Failed to create video writer")
-            
-            frame_count = 0
-            processed_count = 0
-            chunk_size = 30  # Process in chunks of 30 frames
+            # Try OpenCV approach first, fallback to FFmpeg
+            processed_successfully = False
+            opencv_error = None
             
             try:
-                while True:
-                    frames_chunk = []
-                    # Read chunk_size frames
-                    for _ in range(chunk_size):
-                        ret, frame = cap.read()
-                        if not ret:
+                print("🔄 Attempting OpenCV video processing...")
+                
+                # Initialize video writer with H.264 codec
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(temp_output_path, fourcc, target_fps, (output_width, output_height))
+                
+                if not out.isOpened():
+                    raise Exception("OpenCV VideoWriter failed to initialize")
+                
+                # Test write to verify codec works
+                test_frame = np.ones((output_height, output_width, 3), dtype=np.uint8) * 128
+                success = out.write(test_frame)
+                if not success:
+                    out.release()
+                    raise Exception("OpenCV VideoWriter test write failed")
+                
+                # Process video with OpenCV
+                cap = cv2.VideoCapture(temp_input_path)
+                frame_count = 0
+                processed_count = 0
+                chunk_size = 30  # Process in chunks of 30 frames
+                
+                try:
+                    while True:
+                        frames_chunk = []
+                        # Read chunk_size frames
+                        for _ in range(chunk_size):
+                            ret, frame = cap.read()
+                            if not ret:
+                                break
+                            frame_count += 1
+                            frames_chunk.append(frame)
+                        
+                        if not frames_chunk:
                             break
-                        frame_count += 1
-                        frames_chunk.append(frame)
-                    
-                    if not frames_chunk:
-                        break
-                    
-                    # Process chunk of frames
-                    for frame in frames_chunk:
-                        try:
-                            # Resize frame
-                            frame_resized = cv2.resize(frame, (output_width, output_height))
-                            
-                            # Run YOLO on frame
-                            if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
-                                # ONNX model
-                                detections = model.predict(frame_resized)
-                                processed_frame = model.draw_detections(frame_resized, detections)
-                            else:
-                                # PyTorch model
-                                results = model.predict(frame_resized, verbose=False)
-                                processed_frame = results[0].plot()
-                            
-                            # Write frame
-                            out.write(processed_frame)
-                            processed_count += 1
-                            
-                            # Progress update
-                            if processed_count % 50 == 0:
-                                progress = (frame_count / total_frames) * 100
-                                print(f"📊 Progress: {progress:.1f}% ({processed_count}/{total_frames} frames)")
+                        
+                        # Process chunk of frames
+                        for frame in frames_chunk:
+                            try:
+                                # Resize frame
+                                frame_resized = cv2.resize(frame, (output_width, output_height))
                                 
-                            # Memory cleanup
-                            if processed_count % 100 == 0:
-                                gc.collect()
+                                # Run YOLO on frame
+                                if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
+                                    # ONNX model
+                                    detections = model.predict(frame_resized)
+                                    processed_frame = model.draw_detections(frame_resized, detections)
+                                else:
+                                    # PyTorch model
+                                    results = model.predict(frame_resized, verbose=False)
+                                    processed_frame = results[0].plot()
                                 
-                        except Exception as frame_error:
-                            print(f"⚠️ Frame {frame_count} processing failed: {str(frame_error)}")
-                            # Write original frame on error
-                            out.write(frame_resized)
-                    
-                    # Clear chunk from memory
-                    frames_chunk.clear()
+                                # Write frame
+                                write_success = out.write(processed_frame)
+                                if not write_success:
+                                    raise Exception("Frame write failed")
+                                processed_count += 1
+                                
+                                # Progress update
+                                if processed_count % 50 == 0:
+                                    progress = (frame_count / total_frames) * 100
+                                    print(f"📊 OpenCV Progress: {progress:.1f}% ({processed_count}/{total_frames} frames)")
+                                    
+                                # Memory cleanup
+                                if processed_count % 100 == 0:
+                                    gc.collect()
+                                    
+                            except Exception as frame_error:
+                                print(f"⚠️ Frame {frame_count} processing failed: {str(frame_error)}")
+                                # Write original frame on error
+                                out.write(frame_resized)
+                        
+                        # Clear chunk from memory
+                        frames_chunk.clear()
+                        gc.collect()
+                
+                finally:
+                    cap.release()
+                    out.release()
+                    cv2.destroyAllWindows()
                     gc.collect()
+                
+                # Verify OpenCV output
+                if os.path.exists(temp_output_path) and os.path.getsize(temp_output_path) > 1024:
+                    print(f"✅ OpenCV video processing complete: {processed_count}/{total_frames} frames")
+                    processed_successfully = True
+                else:
+                    raise Exception("OpenCV output file invalid")
+                    
+            except Exception as opencv_err:
+                opencv_error = opencv_err
+                print(f"❌ OpenCV processing failed: {str(opencv_error)}")
+                print("🔄 Falling back to FFmpeg approach...")
+                
+                # Clean up failed OpenCV output
+                if os.path.exists(temp_output_path):
+                    os.unlink(temp_output_path)
+                
+                # Use FFmpeg fallback
+                try:
+                    processed_output = process_video_with_ffmpeg(temp_input_path, temp_output_path, model)
+                    if os.path.exists(processed_output) and os.path.getsize(processed_output) > 1024:
+                        temp_output_path = processed_output
+                        processed_successfully = True
+                        print("✅ FFmpeg video processing complete")
+                    else:
+                        raise Exception("FFmpeg output file invalid")
+                        
+                except Exception as ffmpeg_error:
+                    print(f"❌ FFmpeg processing also failed: {str(ffmpeg_error)}")
+                    raise Exception(f"Both OpenCV and FFmpeg failed. OpenCV: {opencv_error}, FFmpeg: {ffmpeg_error}")
             
-            finally:
-                cap.release()
-                out.release()
-                cv2.destroyAllWindows()
-                gc.collect()
-            
-            print(f"✅ Video processing complete:")
-            print(f"   - Processed frames: {processed_count}/{total_frames}")
+            if not processed_successfully:
+                raise Exception("Video processing failed with all methods")
             
             # Read the processed video
             with open(temp_output_path, 'rb') as f:
@@ -341,10 +391,14 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             original_base64 = base64.b64encode(file_data).decode('utf-8')
             processed_base64 = base64.b64encode(processed_video_data).decode('utf-8')
             
+            print(f"✅ Video processing complete:")
+            print(f"   - Method: {'OpenCV' if opencv_error is None else 'FFmpeg'}")
+            print(f"   - Output size: {len(processed_video_data) / (1024*1024):.2f}MB")
+            
             return original_base64, processed_base64, 'video/mp4'
             
         else:
-            # Image processing
+            # Image processing (unchanged)
             print(f"🖼️ Processing image: {filename}")
             
             # Load image

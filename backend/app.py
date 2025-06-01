@@ -25,9 +25,9 @@ os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
 
-# Enhanced CORS configuration
+# Enhanced CORS configuration - Apply to ALL routes
 CORS(app, resources={
-    r"/api/*": {
+    r"/*": {
         "origins": ["*"],
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "Authorization"],
@@ -64,12 +64,18 @@ def is_youtube_url(url):
     return False
 
 @app.route('/', methods=['GET'])
+@cross_origin()
 def home():
-    return jsonify({"message": "Flask server is running on port 5001!"})
+    response = jsonify({"message": "Flask server is running on port 5001!"})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    return response
 
 @app.route('/test', methods=['GET'])
+@cross_origin()
 def test():
-    return jsonify({"message": "Test endpoint working!", "status": "ok"})
+    response = jsonify({"message": "Test endpoint working!", "status": "ok"})
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    return response
 
 # Load model
 print("🤖 Loading YOLO model...")
@@ -86,16 +92,21 @@ def log_request_info():
             print(f"🚨 Large request detected: {int(content_length) / (1024*1024):.1f}MB")
 
 @app.route('/api/upload', methods=['POST'])
+@cross_origin()
 def upload_file():
     try:
         print("🎯 Upload endpoint reached successfully")
         
         if 'file' not in request.files:
-            return jsonify({"error": "No file uploaded"}), 400
+            response = jsonify({"error": "No file uploaded"})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response, 400
         
         file = request.files['file']
         if file.filename == '':
-            return jsonify({"error": "No file selected"}), 400
+            response = jsonify({"error": "No file selected"})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response, 400
         
         # Read file data in chunks for large files
         file_data = file.read()
@@ -104,7 +115,9 @@ def upload_file():
         # Updated file size limit: 75MB
         MAX_FILE_SIZE_MB = 75
         if file_size_mb > MAX_FILE_SIZE_MB:
-            return jsonify({"error": f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."}), 400
+            response = jsonify({"error": f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response, 400
         
         print(f"📁 File uploaded: {file.filename} ({file_size_mb:.2f}MB)")
         
@@ -124,7 +137,9 @@ def upload_file():
         # Validate file type
         allowed_extensions = {'.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.webm'}
         if file_ext not in allowed_extensions:
-            return jsonify({"error": f"Unsupported file type: {file_ext}"}), 400
+            response = jsonify({"error": f"Unsupported file type: {file_ext}"})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response, 400
         
         # For videos, add early validation
         if file_ext in ['.mp4', '.avi', '.mov', '.webm']:
@@ -147,7 +162,9 @@ def upload_file():
                         print(f"❌ Video too long: {duration}s > 120s")
                         if temp_path and os.path.exists(temp_path):
                             os.unlink(temp_path)
-                        return jsonify({"error": "Video too long. Maximum duration is 120 seconds."}), 400
+                        response = jsonify({"error": "Video too long. Maximum duration is 120 seconds."})
+                        response.headers.add('Access-Control-Allow-Origin', '*')
+                        return response, 400
                     
                     print(f"📹 Video duration: {duration:.1f}s - ✅ Within 120s limit")
                     print(f"📊 File size: {file_size_mb:.2f}MB - ✅ Within 75MB limit")
@@ -157,13 +174,17 @@ def upload_file():
                     print(f"⏱️ Estimated processing time: ~{estimated_time} minutes")
                 else:
                     os.unlink(temp_path)
-                    return jsonify({"error": "Invalid video file"}), 400
+                    response = jsonify({"error": "Invalid video file"})
+                    response.headers.add('Access-Control-Allow-Origin', '*')
+                    return response, 400
                     
                 os.unlink(temp_path)
             except Exception as e:
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
-                return jsonify({"error": f"Video validation failed: {str(e)}"}), 400
+                response = jsonify({"error": f"Video validation failed: {str(e)}"})
+                response.headers.add('Access-Control-Allow-Origin', '*')
+                return response, 400
         
         # Process with YOLO in memory
         print("🤖 Starting YOLO processing...")
@@ -182,7 +203,7 @@ def upload_file():
         
         print("✅ YOLO processing complete")
         
-        # Prepare response
+        # Prepare response with explicit CORS headers
         response_data = {
             "message": "File processed successfully",
             "original": f"data:{mime_type};base64,{original_base64}",
@@ -191,27 +212,38 @@ def upload_file():
         }
         
         print("📤 Sending response to client...")
-        return jsonify(response_data)
+        response = jsonify(response_data)
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST')
+        return response
         
     except Exception as e:
         print(f"❌ Error in upload_file: {str(e)}")
         traceback.print_exc()
-        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
+        error_response = jsonify({"error": f"Processing failed: {str(e)}"})
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
 
 @app.route('/api/youtube', methods=['POST'])
+@cross_origin()
 def process_youtube():
     try:
         data = request.get_json()
         youtube_url = data.get('url')
         
         if not youtube_url:
-            return jsonify({"error": "No YouTube URL provided"}), 400
+            response = jsonify({"error": "No YouTube URL provided"})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response, 400
         
         print(f"🔗 Processing YouTube URL: {youtube_url}")
         
         # Validate YouTube URL
         if not is_youtube_url(youtube_url):
-            return jsonify({"error": "Invalid YouTube URL format"}), 400
+            response = jsonify({"error": "Invalid YouTube URL format"})
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response, 400
         
         # Process YouTube video
         print("🤖 Starting YouTube video processing...")
@@ -229,12 +261,18 @@ def process_youtube():
         }
         
         print("📤 Sending response to client...")
-        return jsonify(response_data)
+        response = jsonify(response_data)
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST')
+        return response
         
     except Exception as e:
         print(f"❌ Error in process_youtube: {str(e)}")
         traceback.print_exc()
-        return jsonify({"error": f"YouTube processing failed: {str(e)}"}), 500
+        error_response = jsonify({"error": f"YouTube processing failed: {str(e)}"})
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
 
 # Add chunked upload endpoint
 @app.route('/api/upload-chunk', methods=['POST'])
