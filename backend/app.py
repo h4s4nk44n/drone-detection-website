@@ -224,6 +224,75 @@ def process_youtube():
         traceback.print_exc()
         return jsonify({"error": f"YouTube processing failed: {str(e)}"}), 500
 
+# Add chunked upload endpoint
+@app.route('/api/upload-chunk', methods=['POST'])
+def upload_chunk():
+    try:
+        chunk = request.files['chunk']
+        chunk_index = int(request.form['chunkIndex'])
+        total_chunks = int(request.form['totalChunks'])
+        upload_id = request.form['uploadId']
+        file_name = request.form['fileName']
+        
+        # Create temp directory for this upload
+        temp_dir = os.path.join(tempfile.gettempdir(), f"upload_{upload_id}")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        # Save chunk
+        chunk_path = os.path.join(temp_dir, f"chunk_{chunk_index}")
+        chunk.save(chunk_path)
+        
+        print(f"📦 Saved chunk {chunk_index + 1}/{total_chunks}")
+        
+        return jsonify({"message": f"Chunk {chunk_index + 1} uploaded successfully"})
+        
+    except Exception as e:
+        print(f"❌ Chunk upload error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/process-uploaded', methods=['POST'])
+def process_uploaded():
+    try:
+        data = request.get_json()
+        upload_id = data['uploadId']
+        file_name = data['fileName']
+        
+        # Reconstruct file from chunks
+        temp_dir = os.path.join(tempfile.gettempdir(), f"upload_{upload_id}")
+        
+        # Combine chunks
+        combined_data = bytearray()
+        chunk_index = 0
+        while True:
+            chunk_path = os.path.join(temp_dir, f"chunk_{chunk_index}")
+            if not os.path.exists(chunk_path):
+                break
+            with open(chunk_path, 'rb') as f:
+                combined_data.extend(f.read())
+            chunk_index += 1
+        
+        print(f"📋 Reconstructed file: {len(combined_data)} bytes")
+        
+        # Process with YOLO
+        file_ext = os.path.splitext(file_name)[1].lower()
+        original_base64, processed_base64, mime_type = process_file_in_memory(
+            bytes(combined_data), file_ext, file_name, model
+        )
+        
+        # Cleanup temp files
+        import shutil
+        shutil.rmtree(temp_dir)
+        
+        return jsonify({
+            "message": "Large file processed successfully",
+            "original": f"data:{mime_type};base64,{original_base64}",
+            "processed": f"data:{mime_type};base64,{processed_base64}"
+        })
+        
+    except Exception as e:
+        print(f"❌ Process uploaded error: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
     # Get port from environment (Google Cloud Run sets PORT automatically)
     port = int(os.environ.get('PORT', 8080))  # Changed default to 8080

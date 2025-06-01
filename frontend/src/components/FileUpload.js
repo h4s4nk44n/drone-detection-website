@@ -95,6 +95,52 @@ const FileUpload = () => {
         }
     };
 
+    const uploadLargeFile = async (file) => {
+        const CHUNK_SIZE = 25 * 1024 * 1024; // 25MB chunks
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        
+        console.log(`📦 Splitting ${file.size / (1024 * 1024).toFixed(1)}MB file into ${totalChunks} chunks`);
+        
+        const uploadId = Date.now().toString();
+        
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+            const start = chunkIndex * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            
+            const chunkFormData = new FormData();
+            chunkFormData.append('chunk', chunk);
+            chunkFormData.append('chunkIndex', chunkIndex.toString());
+            chunkFormData.append('totalChunks', totalChunks.toString());
+            chunkFormData.append('uploadId', uploadId);
+            chunkFormData.append('fileName', file.name);
+            
+            console.log(`�� Uploading chunk ${chunkIndex + 1}/${totalChunks}`);
+            setMessage(`🔄 Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
+            
+            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload-chunk', {
+                method: 'POST',
+                body: chunkFormData
+            });
+            
+            if (!response.ok) {
+                throw new Error(`Chunk ${chunkIndex + 1} upload failed`);
+            }
+        }
+        
+        // Process the complete file
+        console.log('📋 Processing complete file...');
+        setMessage('🤖 Processing complete video... This may take 30-90 minutes...');
+        
+        const processResponse = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/process-uploaded', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, fileName: file.name })
+        });
+        
+        return processResponse;
+    };
+
     const handleFileUpload = async () => {
         if (!file) {
             alert('Please select a file first');
@@ -140,42 +186,20 @@ const FileUpload = () => {
         formData.append('file', file);
 
         try {
-            console.log(`📤 Uploading ${fileSizeMB.toFixed(1)}MB file to server...`);
+            let response;
             
-            // EXTREME timeouts for large videos
-            let timeoutMs;
-            if (fileSizeMB > 30) {
-                timeoutMs = 5400000; // 90 minutes for very large files
-                setMessage(`🔄 Processing very large video (${fileSizeMB.toFixed(1)}MB)... This will take 45-90 minutes. Please keep this tab open and be very patient...`);
-            } else if (fileSizeMB > 20) {
-                timeoutMs = 3600000; // 60 minutes for large files
-                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This will take 30-60 minutes. Please keep this tab open...`);
-            } else if (fileSizeMB > 10) {
-                timeoutMs = 1800000; // 30 minutes for medium files
-                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 15-30 minutes. Please wait...`);
+            // Use chunked upload for files > 25MB
+            if (fileSizeMB > 25) {
+                console.log('🔄 Using chunked upload for large file...');
+                response = await uploadLargeFile(file);
             } else {
-                timeoutMs = 900000;  // 15 minutes for small files
-                setMessage('🔄 Processing video... This may take 5-15 minutes. Please wait...');
+                console.log('🔄 Using standard upload...');
+                response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
             }
             
-            console.log(`⏱️ EXTREME timeout set to ${timeoutMs / 60000} minutes for ${fileSizeMB.toFixed(1)}MB file`);
-            console.log(`🚨 WARNING: Large video processing can take up to ${timeoutMs / 60000} minutes!`);
-            
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => {
-                console.log(`❌ Request timed out after ${timeoutMs / 60000} minutes`);
-                controller.abort();
-            }, timeoutMs);
-            
-            // Simplified fetch for better reliability
-            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
-                method: 'POST',
-                body: formData,
-                signal: controller.signal
-            });
-
-            clearTimeout(timeoutId);
-
             console.log('📡 Response received - Status:', response.status);
             console.log('📡 Response headers:', [...response.headers.entries()]);
 
