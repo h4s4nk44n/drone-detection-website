@@ -95,12 +95,12 @@ const FileUpload = () => {
     };
 
     const downloadFileInChunks = async (fileInfo, fileType) => {
+        const chunks = []; // Declare chunks outside try block to avoid scope issues
+        
         try {
             console.log(`📥 Starting chunked download: ${fileInfo.chunks} chunks (${(fileInfo.size / (1024*1024)).toFixed(2)}MB)`);
             console.log(`📋 File info:`, fileInfo);
             setMessage(`📥 Downloading ${fileType} result in ${fileInfo.chunks} chunks...`);
-            
-            const chunks = [];
             
             // Download all chunks with retry logic
             for (let i = 0; i < fileInfo.chunks; i++) {
