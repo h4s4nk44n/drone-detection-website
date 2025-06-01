@@ -25,13 +25,25 @@ os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
 
-# Simple CORS - let Flask-Cors handle everything
-CORS(app, origins=["*"])
+# Enhanced CORS configuration
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["*"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "max_age": 3600,
+        "supports_credentials": True
+    }
+})
 
-# Configure Flask for large files
+# Configure Flask for large files and longer timeouts
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
 app.config['DEBUG'] = False
 app.config['TESTING'] = False
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+# Increase timeout for large file processing
+app.config['PERMANENT_SESSION_LIFETIME'] = 1800  # 30 minutes
 
 def is_youtube_url(url):
     """
@@ -251,49 +263,108 @@ def upload_chunk():
         print(f"❌ Chunk upload error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/process-uploaded', methods=['POST'])
+@app.route('/api/process-uploaded', methods=['POST', 'OPTIONS'])
 @cross_origin()
 def process_uploaded():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
+        response.headers.add('Access-Control-Allow-Methods', 'POST')
+        return response
+        
     try:
+        # Clear memory before processing
+        gc.collect()
+        
         data = request.get_json()
-        upload_id = data['uploadId']
-        file_name = data['fileName']
+        if not data:
+            return jsonify({"error": "No JSON data received"}), 400
+            
+        upload_id = data.get('uploadId')
+        file_name = data.get('fileName')
+        
+        if not upload_id or not file_name:
+            return jsonify({"error": "Missing uploadId or fileName"}), 400
         
         # Reconstruct file from chunks
         temp_dir = os.path.join(tempfile.gettempdir(), f"upload_{upload_id}")
+        if not os.path.exists(temp_dir):
+            return jsonify({"error": "Upload directory not found"}), 404
         
-        # Combine chunks
-        combined_data = bytearray()
-        chunk_index = 0
-        while True:
-            chunk_path = os.path.join(temp_dir, f"chunk_{chunk_index}")
-            if not os.path.exists(chunk_path):
-                break
-            with open(chunk_path, 'rb') as f:
-                combined_data.extend(f.read())
-            chunk_index += 1
-        
-        print(f"📋 Reconstructed file: {len(combined_data)} bytes")
-        
-        # Process with YOLO
-        file_ext = os.path.splitext(file_name)[1].lower()
-        original_base64, processed_base64, mime_type = process_file_in_memory(
-            bytes(combined_data), file_ext, file_name, model
-        )
-        
-        # Cleanup temp files
-        import shutil
-        shutil.rmtree(temp_dir)
-        
-        return jsonify({
-            "message": "Large file processed successfully",
-            "original": f"data:{mime_type};base64,{original_base64}",
-            "processed": f"data:{mime_type};base64,{processed_base64}"
-        })
-        
+        try:
+            # Combine chunks with progress tracking
+            combined_data = bytearray()
+            chunk_index = 0
+            total_size = 0
+            
+            print(f"🔄 Reconstructing file from chunks in {temp_dir}")
+            
+            while True:
+                chunk_path = os.path.join(temp_dir, f"chunk_{chunk_index}")
+                if not os.path.exists(chunk_path):
+                    break
+                    
+                with open(chunk_path, 'rb') as f:
+                    chunk_data = f.read()
+                    combined_data.extend(chunk_data)
+                    total_size += len(chunk_data)
+                    print(f"📦 Added chunk {chunk_index}, total size: {total_size / (1024*1024):.2f}MB")
+                
+                chunk_index += 1
+            
+            if total_size == 0:
+                raise Exception("No chunks found")
+                
+            print(f"📋 Reconstructed file: {total_size / (1024*1024):.2f}MB")
+            
+            # Process with YOLO
+            file_ext = os.path.splitext(file_name)[1].lower()
+            
+            # Memory check before processing
+            available_memory = psutil.virtual_memory().available / (1024 * 1024)
+            print(f"💾 Available memory before processing: {available_memory:.2f}MB")
+            
+            if available_memory < total_size * 2:  # Need at least 2x file size
+                raise Exception("Insufficient memory available for processing")
+            
+            original_base64, processed_base64, mime_type = process_file_in_memory(
+                bytes(combined_data), file_ext, file_name, model
+            )
+            
+            # Cleanup temp files
+            import shutil
+            shutil.rmtree(temp_dir)
+            
+            # Force garbage collection after processing
+            gc.collect()
+            
+            response = jsonify({
+                "message": "Large file processed successfully",
+                "original": f"data:{mime_type};base64,{original_base64}",
+                "processed": f"data:{mime_type};base64,{processed_base64}"
+            })
+            
+            # Add CORS headers explicitly
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            return response
+            
+        except Exception as process_error:
+            # Cleanup on error
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+            raise process_error
+            
     except Exception as e:
         print(f"❌ Process uploaded error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        traceback.print_exc()
+        
+        error_response = jsonify({
+            "error": str(e),
+            "details": traceback.format_exc()
+        })
+        error_response.headers.add('Access-Control-Allow-Origin', '*')
+        return error_response, 500
 
 if __name__ == '__main__':
     # Get port from environment (Google Cloud Run sets PORT automatically)

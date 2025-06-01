@@ -8,6 +8,7 @@ from io import BytesIO
 import numpy as np
 import yt_dlp
 import subprocess
+import gc
 
 YOLO_PROCESSING_SIZE = 832  # High accuracy processing for all media
 
@@ -220,58 +221,119 @@ def process_file_in_memory(file_data, file_ext, filename, model):
     
     try:
         if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
-            # Define the output path that was missing
-            temp_output_path = os.path.splitext(temp_input_path)[0] + '_processed' + file_ext
+            # Define the output path
+            temp_output_path = os.path.splitext(temp_input_path)[0] + '_processed.mp4'
             
-            # Simplified video processing for Cloud Run
+            # Get video info first
             cap = cv2.VideoCapture(temp_input_path)
+            if not cap.isOpened():
+                raise Exception(f"Could not open video: {temp_input_path}")
             
             # Get video properties
-            fps = cap.get(cv2.CAP_PROP_FPS)
+            fps = int(cap.get(cv2.CAP_PROP_FPS))
             width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
             height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_frames / fps if fps > 0 else 0
             
-            print(f"📹 Video: {width}x{height} @ {fps} fps")
+            print(f"📹 Video info:")
+            print(f"   - Resolution: {width}x{height}")
+            print(f"   - FPS: {fps}")
+            print(f"   - Duration: {duration:.1f}s")
+            print(f"   - Total frames: {total_frames}")
             
-            # Use Motion JPEG (most reliable for Cloud Run)
-            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
-            out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
+            # Calculate target resolution (max 720p)
+            if width > height:
+                output_width = min(width, 1280)
+                output_height = int(height * (output_width / width))
+            else:
+                output_height = min(height, 720)
+                output_width = int(width * (output_height / height))
+            
+            # Ensure even dimensions
+            output_width = output_width - (output_width % 2)
+            output_height = output_height - (output_height % 2)
+            
+            # Target lower FPS for processing efficiency
+            target_fps = min(30, fps)
+            
+            print(f"🎯 Processing plan:")
+            print(f"   - Output: {output_width}x{output_height} @ {target_fps}fps")
+            print(f"   - Scaling: {width}x{height} -> {output_width}x{output_height}")
+            
+            # Initialize video writer with H.264 codec
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            out = cv2.VideoWriter(temp_output_path, fourcc, target_fps, (output_width, output_height))
             
             if not out.isOpened():
-                print("❌ Video writer failed, trying different codec...")
-                # Fallback: try default codec
-                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
-            
-            print("✅ Video writer created successfully")
+                raise Exception("Failed to create video writer")
             
             frame_count = 0
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            processed_count = 0
+            chunk_size = 30  # Process in chunks of 30 frames
             
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-                
-                frame_count += 1
-                if frame_count % 30 == 0:  # Log every 30 frames
-                    progress = (frame_count / total_frames) * 100
-                    print(f"🎬 Processing frame {frame_count}/{total_frames} ({progress:.1f}%)")
-                
-                # Run YOLO inference
-                results = model(frame)
-                
-                # Draw detections
-                annotated_frame = results[0].plot()
-                
-                # Write frame
-                out.write(annotated_frame)
+            try:
+                while True:
+                    frames_chunk = []
+                    # Read chunk_size frames
+                    for _ in range(chunk_size):
+                        ret, frame = cap.read()
+                        if not ret:
+                            break
+                        frame_count += 1
+                        frames_chunk.append(frame)
+                    
+                    if not frames_chunk:
+                        break
+                    
+                    # Process chunk of frames
+                    for frame in frames_chunk:
+                        try:
+                            # Resize frame
+                            frame_resized = cv2.resize(frame, (output_width, output_height))
+                            
+                            # Run YOLO on frame
+                            if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
+                                # ONNX model
+                                detections = model.predict(frame_resized)
+                                processed_frame = model.draw_detections(frame_resized, detections)
+                            else:
+                                # PyTorch model
+                                results = model.predict(frame_resized, verbose=False)
+                                processed_frame = results[0].plot()
+                            
+                            # Write frame
+                            out.write(processed_frame)
+                            processed_count += 1
+                            
+                            # Progress update
+                            if processed_count % 50 == 0:
+                                progress = (frame_count / total_frames) * 100
+                                print(f"📊 Progress: {progress:.1f}% ({processed_count}/{total_frames} frames)")
+                                
+                            # Memory cleanup
+                            if processed_count % 100 == 0:
+                                gc.collect()
+                                
+                        except Exception as frame_error:
+                            print(f"⚠️ Frame {frame_count} processing failed: {str(frame_error)}")
+                            # Write original frame on error
+                            out.write(frame_resized)
+                    
+                    # Clear chunk from memory
+                    frames_chunk.clear()
+                    gc.collect()
             
-            cap.release()
-            out.release()
-            print("✅ Video processing completed")
+            finally:
+                cap.release()
+                out.release()
+                cv2.destroyAllWindows()
+                gc.collect()
             
-            # Read the processed video and convert to base64
+            print(f"✅ Video processing complete:")
+            print(f"   - Processed frames: {processed_count}/{total_frames}")
+            
+            # Read the processed video
             with open(temp_output_path, 'rb') as f:
                 processed_video_data = f.read()
             
@@ -279,10 +341,8 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             original_base64 = base64.b64encode(file_data).decode('utf-8')
             processed_base64 = base64.b64encode(processed_video_data).decode('utf-8')
             
-            mime_type = "video/mp4"
+            return original_base64, processed_base64, 'video/mp4'
             
-            return original_base64, processed_base64, mime_type
-        
         else:
             # Image processing
             print(f"🖼️ Processing image: {filename}")
@@ -296,16 +356,10 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
                 # ONNX model
                 detections = model.predict(image)
-                if len(detections) > 0:
-                    processed_image = model.draw_detections(image, detections)
-                    print(f"🎯 ONNX detected {len(detections)} objects")
-                else:
-                    processed_image = image
-                    print("🔍 ONNX found no objects")
+                processed_image = model.draw_detections(image, detections)
             else:
-                # PyTorch model (fallback)
-                print("🤖 Using PyTorch model for inference...")
-                results = model.predict(image, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
+                # PyTorch model
+                results = model.predict(image, verbose=False)
                 processed_image = results[0].plot()
             
             # Convert to bytes
@@ -319,14 +373,14 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             original_base64 = base64.b64encode(original_bytes).decode('utf-8')
             processed_base64 = base64.b64encode(processed_bytes).decode('utf-8')
             
-            mime_type = "image/jpeg"
-            
-            return original_base64, processed_base64, mime_type
+            return original_base64, processed_base64, 'image/jpeg'
     
     finally:
-        # Clean up temp input
+        # Cleanup temp files
         if os.path.exists(temp_input_path):
             os.unlink(temp_input_path)
+        if 'temp_output_path' in locals() and os.path.exists(temp_output_path):
+            os.unlink(temp_output_path)
 
 def process_image_in_memory(file_data, model):
     """Process image entirely in memory using ONNX or PyTorch model"""
@@ -585,7 +639,6 @@ def process_video_with_temp_files(input_path, output_path, model):
                 
                 # Memory cleanup
                 if frame_count % 25 == 0:
-                    import gc
                     gc.collect()
                 
             except Exception as frame_error:
@@ -610,7 +663,6 @@ def process_video_with_temp_files(input_path, output_path, model):
         if out:
             out.release()
         cv2.destroyAllWindows()
-        import gc
         gc.collect()
     
     # Verify output
