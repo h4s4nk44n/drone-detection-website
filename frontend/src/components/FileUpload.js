@@ -95,11 +95,78 @@ const FileUpload = () => {
         }
     };
 
+    const downloadFileInChunks = async (fileInfo, fileType) => {
+        try {
+            console.log(`📥 Starting chunked download: ${fileInfo.chunks} chunks (${(fileInfo.size / (1024*1024)).toFixed(2)}MB)`);
+            setMessage(`📥 Downloading ${fileType} result in ${fileInfo.chunks} chunks...`);
+            
+            const chunks = [];
+            
+            // Download all chunks
+            for (let i = 0; i < fileInfo.chunks; i++) {
+                setMessage(`📥 Downloading ${fileType} chunk ${i + 1}/${fileInfo.chunks}...`);
+                
+                const response = await fetch(`https://drone-detection-686868741947.europe-west1.run.app/api/download-chunk/${fileInfo.file_id}/${i}`, {
+                    method: 'GET'
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`Failed to download chunk ${i + 1}`);
+                }
+                
+                const chunkData = await response.json();
+                
+                // Convert base64 back to binary
+                const binaryString = atob(chunkData.chunk_data);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let j = 0; j < binaryString.length; j++) {
+                    bytes[j] = binaryString.charCodeAt(j);
+                }
+                
+                chunks.push(bytes);
+                console.log(`📦 Downloaded chunk ${i + 1}: ${bytes.length} bytes`);
+            }
+            
+            // Combine all chunks
+            console.log('🔧 Assembling chunks...');
+            const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+            const combined = new Uint8Array(totalSize);
+            
+            let offset = 0;
+            for (const chunk of chunks) {
+                combined.set(chunk, offset);
+                offset += chunk.length;
+            }
+            
+            // Create blob and object URL
+            const blob = new Blob([combined], { type: fileInfo.mime_type });
+            const objectUrl = URL.createObjectURL(blob);
+            
+            console.log(`✅ ${fileType} file assembled: ${(totalSize / (1024*1024)).toFixed(2)}MB`);
+            
+            // Cleanup server file
+            try {
+                await fetch(`https://drone-detection-686868741947.europe-west1.run.app/api/cleanup-download/${fileInfo.file_id}`, {
+                    method: 'POST'
+                });
+                console.log(`🧹 Cleaned up server file: ${fileInfo.file_id}`);
+            } catch (cleanupError) {
+                console.warn('⚠️ Failed to cleanup server file:', cleanupError);
+            }
+            
+            return objectUrl;
+            
+        } catch (error) {
+            console.error(`❌ Chunked download failed for ${fileType}:`, error);
+            throw error;
+        }
+    };
+
     const uploadLargeFile = async (file) => {
         const CHUNK_SIZE = 25 * 1024 * 1024; // 25MB chunks
         const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
         
-        console.log(`📦 Splitting ${file.size / (1024 * 1024).toFixed(1)}MB file into ${totalChunks} chunks`);
+        console.log(`📦 Splitting ${(file.size / (1024 * 1024)).toFixed(1)}MB file into ${totalChunks} chunks`);
         
         const uploadId = Date.now().toString();
         
@@ -130,14 +197,14 @@ const FileUpload = () => {
         
         // Process the complete file
         console.log('📋 Processing complete file...');
-        setMessage('🤖 Processing complete video... This may take 30-90 minutes...');
+        setMessage('🤖 Processing complete video... This may take several minutes...');
         
         const controller = new AbortController();
         const processResponse = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/process-uploaded', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ uploadId, fileName: file.name }),
-            signal: controller.signal  // Add timeout signal
+            signal: controller.signal
         });
         
         return { processResponse, controller };
@@ -173,8 +240,10 @@ const FileUpload = () => {
         
         // Dynamic message based on file size
         if (currentMediaType === 'video') {
-            if (fileSizeMB > 30) {
-                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 15-20 minutes. Please be patient and keep this tab open...`);
+            if (fileSizeMB > 50) {
+                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 20-30 minutes. Please be patient and keep this tab open...`);
+            } else if (fileSizeMB > 30) {
+                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 15-20 minutes. Please wait...`);
             } else if (fileSizeMB > 15) {
                 setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 8-12 minutes. Please wait...`);
             } else {
@@ -220,11 +289,29 @@ const FileUpload = () => {
 
             const data = await response.json();
             console.log('✅ File processing completed successfully');
-            console.log('📊 Response data size:', JSON.stringify(data).length, 'characters');
+            console.log('📊 Response data:', data);
             
-            setOriginalMedia(data.original_file || data.original);
-            setProcessedMedia(data.output_file || data.processed);
-            setMessage(`✅ ${data.message} (File size: ${data.file_size_mb || fileSizeMB.toFixed(1)}MB)`);
+            // Handle chunked download response
+            if (data.chunked_download) {
+                console.log('🔄 Processing chunked download response...');
+                setMessage('📥 Downloading processed results...');
+                
+                // Download original file in chunks
+                const originalUrl = await downloadFileInChunks(data.original_file, 'original');
+                
+                // Download processed file in chunks  
+                const processedUrl = await downloadFileInChunks(data.processed_file, 'processed');
+                
+                setOriginalMedia(originalUrl);
+                setProcessedMedia(processedUrl);
+                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb}MB) - Downloaded via chunked transfer`);
+                
+            } else {
+                // Handle regular response (for smaller files)
+                setOriginalMedia(data.original_file || data.original);
+                setProcessedMedia(data.output_file || data.processed);
+                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb || fileSizeMB.toFixed(1)}MB)`);
+            }
             
         } catch (error) {
             console.error('❌ File upload failed:', error);
@@ -234,12 +321,21 @@ const FileUpload = () => {
                 stack: error.stack
             });
             
+            // Enhanced error handling for different scenarios
             if (error.name === 'AbortError') {
                 setMessage(`❌ Request timed out. Large files (${fileSizeMB.toFixed(1)}MB) need more time. Please try with a smaller file or check your connection.`);
             } else if (error.message.includes('NetworkError') || error.message.includes('fetch')) {
                 setMessage('❌ Network error. Please check your internet connection and try again.');
             } else if (error.message.includes('CORS')) {
                 setMessage('❌ Server configuration error (CORS). Please contact support.');
+            } else if (error.message.includes('too large for response') || error.message.includes('Cloud Run limit')) {
+                setMessage(`❌ ${error.message} The video was processed but the result is too large to display. Try with a shorter video (under 20MB).`);
+            } else if (error.message.includes('File too large for processing')) {
+                setMessage(`❌ ${error.message} Please compress your video or try with a shorter clip.`);
+            } else if (error.message.includes('413')) {
+                setMessage('❌ File or response too large. Please try with a smaller file (under 20MB for videos).');
+            } else if (error.message.includes('Failed to download chunk')) {
+                setMessage(`❌ Download failed: ${error.message}. The video was processed but couldn't be downloaded. Please try again.`);
             } else {
                 setMessage(`❌ Error: ${error.message}`);
             }
