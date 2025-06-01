@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 import logging
 import psutil
 import gc
+import shutil
 
 # Load environment variables
 load_dotenv()
@@ -25,16 +26,13 @@ os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
 
-# Enhanced CORS configuration - Apply to ALL routes
-CORS(app, resources={
-    r"/*": {
-        "origins": ["*"],
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type", "Authorization"],
-        "max_age": 3600,
-        "supports_credentials": True
-    }
-})
+# Simple and comprehensive CORS configuration
+CORS(app, 
+     origins=["*"],
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization"],
+     supports_credentials=False,
+     max_age=3600)
 
 # Configure Flask for large files and longer timeouts
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
@@ -44,6 +42,15 @@ app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
 # Increase timeout for large file processing
 app.config['PERMANENT_SESSION_LIFETIME'] = 1800  # 30 minutes
+
+# Add global CORS headers for all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'false')
+    return response
 
 def is_youtube_url(url):
     """
@@ -64,18 +71,12 @@ def is_youtube_url(url):
     return False
 
 @app.route('/', methods=['GET'])
-@cross_origin()
 def home():
-    response = jsonify({"message": "Flask server is running on port 5001!"})
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    return response
+    return jsonify({"message": "Flask server is running on port 5001!"})
 
 @app.route('/test', methods=['GET'])
-@cross_origin()
 def test():
-    response = jsonify({"message": "Test endpoint working!", "status": "ok"})
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    return response
+    return jsonify({"message": "Test endpoint working!", "status": "ok"})
 
 # Load model
 print("🤖 Loading YOLO model...")
@@ -99,13 +100,11 @@ def upload_file():
         
         if 'file' not in request.files:
             response = jsonify({"error": "No file uploaded"})
-            response.headers.add('Access-Control-Allow-Origin', '*')
             return response, 400
         
         file = request.files['file']
         if file.filename == '':
             response = jsonify({"error": "No file selected"})
-            response.headers.add('Access-Control-Allow-Origin', '*')
             return response, 400
         
         # Read file data in chunks for large files
@@ -116,7 +115,6 @@ def upload_file():
         MAX_FILE_SIZE_MB = 75
         if file_size_mb > MAX_FILE_SIZE_MB:
             response = jsonify({"error": f"File too large. Maximum size is {MAX_FILE_SIZE_MB}MB."})
-            response.headers.add('Access-Control-Allow-Origin', '*')
             return response, 400
         
         print(f"📁 File uploaded: {file.filename} ({file_size_mb:.2f}MB)")
@@ -138,7 +136,6 @@ def upload_file():
         allowed_extensions = {'.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.webm'}
         if file_ext not in allowed_extensions:
             response = jsonify({"error": f"Unsupported file type: {file_ext}"})
-            response.headers.add('Access-Control-Allow-Origin', '*')
             return response, 400
         
         # For videos, add early validation
@@ -163,7 +160,6 @@ def upload_file():
                         if temp_path and os.path.exists(temp_path):
                             os.unlink(temp_path)
                         response = jsonify({"error": "Video too long. Maximum duration is 120 seconds."})
-                        response.headers.add('Access-Control-Allow-Origin', '*')
                         return response, 400
                     
                     print(f"📹 Video duration: {duration:.1f}s - ✅ Within 120s limit")
@@ -175,7 +171,6 @@ def upload_file():
                 else:
                     os.unlink(temp_path)
                     response = jsonify({"error": "Invalid video file"})
-                    response.headers.add('Access-Control-Allow-Origin', '*')
                     return response, 400
                     
                 os.unlink(temp_path)
@@ -183,7 +178,6 @@ def upload_file():
                 if os.path.exists(temp_path):
                     os.unlink(temp_path)
                 response = jsonify({"error": f"Video validation failed: {str(e)}"})
-                response.headers.add('Access-Control-Allow-Origin', '*')
                 return response, 400
         
         # Process with YOLO in memory
@@ -213,16 +207,12 @@ def upload_file():
         
         print("📤 Sending response to client...")
         response = jsonify(response_data)
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-        response.headers.add('Access-Control-Allow-Methods', 'POST')
         return response
         
     except Exception as e:
         print(f"❌ Error in upload_file: {str(e)}")
         traceback.print_exc()
         error_response = jsonify({"error": f"Processing failed: {str(e)}"})
-        error_response.headers.add('Access-Control-Allow-Origin', '*')
         return error_response, 500
 
 @app.route('/api/youtube', methods=['POST'])
@@ -234,7 +224,6 @@ def process_youtube():
         
         if not youtube_url:
             response = jsonify({"error": "No YouTube URL provided"})
-            response.headers.add('Access-Control-Allow-Origin', '*')
             return response, 400
         
         print(f"🔗 Processing YouTube URL: {youtube_url}")
@@ -242,7 +231,6 @@ def process_youtube():
         # Validate YouTube URL
         if not is_youtube_url(youtube_url):
             response = jsonify({"error": "Invalid YouTube URL format"})
-            response.headers.add('Access-Control-Allow-Origin', '*')
             return response, 400
         
         # Process YouTube video
@@ -262,16 +250,12 @@ def process_youtube():
         
         print("📤 Sending response to client...")
         response = jsonify(response_data)
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-        response.headers.add('Access-Control-Allow-Methods', 'POST')
         return response
         
     except Exception as e:
         print(f"❌ Error in process_youtube: {str(e)}")
         traceback.print_exc()
         error_response = jsonify({"error": f"YouTube processing failed: {str(e)}"})
-        error_response.headers.add('Access-Control-Allow-Origin', '*')
         return error_response, 500
 
 # Add chunked upload endpoint
@@ -306,14 +290,19 @@ def upload_chunk():
 def process_uploaded():
     if request.method == 'OPTIONS':
         response = make_response()
-        response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
-        response.headers.add('Access-Control-Allow-Methods', 'POST')
         return response
         
     try:
         # Clear memory before processing
         gc.collect()
+        
+        # Check available memory
+        available_memory = psutil.virtual_memory().available / (1024 * 1024)
+        print(f"💾 Available memory: {available_memory:.2f}MB")
+        
+        # Reduce memory threshold for Cloud Run (2GB instances)
+        if available_memory < 500:  # Less than 500MB available
+            return jsonify({"error": "Insufficient memory available for processing"}), 503
         
         data = request.get_json()
         if not data:
@@ -363,16 +352,19 @@ def process_uploaded():
             available_memory = psutil.virtual_memory().available / (1024 * 1024)
             print(f"💾 Available memory before processing: {available_memory:.2f}MB")
             
-            if available_memory < total_size * 2:  # Need at least 2x file size
-                raise Exception("Insufficient memory available for processing")
+            # More conservative memory check for large files
+            if total_size > 50 * 1024 * 1024 and available_memory < 1000:  # 50MB file needs 1GB free
+                raise Exception("Insufficient memory available for large file processing")
+            elif total_size > 20 * 1024 * 1024 and available_memory < 500:  # 20MB file needs 500MB free
+                raise Exception("Insufficient memory available for medium file processing")
             
             original_base64, processed_base64, mime_type = process_file_in_memory(
                 bytes(combined_data), file_ext, file_name, model
             )
             
-            # Cleanup temp files
-            import shutil
-            shutil.rmtree(temp_dir)
+            # Cleanup temp files immediately
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
             
             # Force garbage collection after processing
             gc.collect()
@@ -383,8 +375,6 @@ def process_uploaded():
                 "processed": f"data:{mime_type};base64,{processed_base64}"
             })
             
-            # Add CORS headers explicitly
-            response.headers.add('Access-Control-Allow-Origin', '*')
             return response
             
         except Exception as process_error:
@@ -401,7 +391,6 @@ def process_uploaded():
             "error": str(e),
             "details": traceback.format_exc()
         })
-        error_response.headers.add('Access-Control-Allow-Origin', '*')
         return error_response, 500
 
 if __name__ == '__main__':
