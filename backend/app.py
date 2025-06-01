@@ -3,7 +3,7 @@ import os
 import base64
 from ultralytics import YOLO
 from yolo_utils import process_file_in_memory, process_youtube_video
-from flask_cors import CORS
+from flask_cors import CORS, cross_origin
 import traceback
 import tempfile
 import cv2
@@ -25,7 +25,7 @@ os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
 
-# Simple CORS - let Flask-CORS handle everything
+# Simple CORS - let Flask-Cors handle everything
 CORS(app, origins=["*"])
 
 # Configure Flask for large files
@@ -226,6 +226,7 @@ def process_youtube():
 
 # Add chunked upload endpoint
 @app.route('/api/upload-chunk', methods=['POST'])
+@cross_origin()
 def upload_chunk():
     try:
         chunk = request.files['chunk']
@@ -251,6 +252,7 @@ def upload_chunk():
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/process-uploaded', methods=['POST'])
+@cross_origin()
 def process_uploaded():
     try:
         data = request.get_json()

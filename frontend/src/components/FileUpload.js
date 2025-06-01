@@ -115,7 +115,7 @@ const FileUpload = () => {
             chunkFormData.append('uploadId', uploadId);
             chunkFormData.append('fileName', file.name);
             
-            console.log(`�� Uploading chunk ${chunkIndex + 1}/${totalChunks}`);
+            console.log(`🔄 Uploading chunk ${chunkIndex + 1}/${totalChunks}`);
             setMessage(`🔄 Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
             
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload-chunk', {
@@ -132,13 +132,15 @@ const FileUpload = () => {
         console.log('📋 Processing complete file...');
         setMessage('🤖 Processing complete video... This may take 30-90 minutes...');
         
+        const controller = new AbortController();
         const processResponse = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/process-uploaded', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uploadId, fileName: file.name })
+            body: JSON.stringify({ uploadId, fileName: file.name }),
+            signal: controller.signal  // Add timeout signal
         });
         
-        return processResponse;
+        return { processResponse, controller };
     };
 
     const handleFileUpload = async () => {
@@ -191,7 +193,8 @@ const FileUpload = () => {
             // Use chunked upload for files > 25MB
             if (fileSizeMB > 25) {
                 console.log('🔄 Using chunked upload for large file...');
-                response = await uploadLargeFile(file);
+                const { processResponse, controller } = await uploadLargeFile(file);
+                response = processResponse;
             } else {
                 console.log('🔄 Using standard upload...');
                 response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {

@@ -220,33 +220,65 @@ def process_file_in_memory(file_data, file_ext, filename, model):
     
     try:
         if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
-            # Video processing with FFmpeg fallback
-            with tempfile.NamedTemporaryFile(suffix='.mp4', delete=False) as temp_output:
-                temp_output_path = temp_output.name
+            # Simplified video processing for Cloud Run
+            cap = cv2.VideoCapture(temp_input_path)
             
-            try:
-                # Use FFmpeg fallback approach
-                output_path = process_video_with_ffmpeg_fallback(temp_input_path, temp_output_path, model)
+            # Get video properties
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            
+            print(f"📹 Video: {width}x{height} @ {fps} fps")
+            
+            # Use Motion JPEG (most reliable for Cloud Run)
+            fourcc = cv2.VideoWriter_fourcc(*'MJPG')
+            out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
+            
+            if not out.isOpened():
+                print("❌ Video writer failed, trying different codec...")
+                # Fallback: try default codec
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                out = cv2.VideoWriter(temp_output_path, fourcc, fps, (width, height))
+            
+            print("✅ Video writer created successfully")
+            
+            frame_count = 0
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
                 
-                # Read processed video
-                with open(output_path, 'rb') as f:
-                    processed_data = f.read()
+                frame_count += 1
+                if frame_count % 30 == 0:  # Log every 30 frames
+                    progress = (frame_count / total_frames) * 100
+                    print(f"🎬 Processing frame {frame_count}/{total_frames} ({progress:.1f}%)")
                 
-                # Convert to base64
-                original_base64 = base64.b64encode(file_data).decode('utf-8')
-                processed_base64 = base64.b64encode(processed_data).decode('utf-8')
+                # Run YOLO inference
+                results = model(frame)
                 
-                # Use MP4 MIME type for better browser compatibility
-                mime_type = "video/mp4"
+                # Draw detections
+                annotated_frame = results[0].plot()
                 
-                print(f"🎥 Output MIME type: {mime_type}")
-                
-                return original_base64, processed_base64, mime_type
-                
-            finally:
-                # Clean up temp output
-                if os.path.exists(temp_output_path):
-                    os.unlink(temp_output_path)
+                # Write frame
+                out.write(annotated_frame)
+            
+            cap.release()
+            out.release()
+            print("✅ Video processing completed")
+            
+            # Read processed video
+            with open(temp_output_path, 'rb') as f:
+                processed_data = f.read()
+            
+            # Convert to base64
+            original_base64 = base64.b64encode(file_data).decode('utf-8')
+            processed_base64 = base64.b64encode(processed_data).decode('utf-8')
+            
+            mime_type = "video/mp4"
+            
+            return original_base64, processed_base64, mime_type
         
         else:
             # Image processing
@@ -584,7 +616,7 @@ def process_video_with_temp_files(input_path, output_path, model):
     
     file_size = os.path.getsize(output_path)
     if file_size < 1024:
-        raise Exception(f"Output file too small: {file_size} bytes")
+        raise Exception("Output file too small")
     
     if written_count == 0:
         raise Exception("No frames were successfully written to output video")
