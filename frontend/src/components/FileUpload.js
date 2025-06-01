@@ -3,7 +3,6 @@ import React, { useState, useEffect, useRef } from 'react';
 
 const FileUpload = () => {
     const [file, setFile] = useState(null);
-    const [youtubeUrl, setYoutubeUrl] = useState('');
     const [originalMedia, setOriginalMedia] = useState('');
     const [processedMedia, setProcessedMedia] = useState('');
     const [mediaType, setMediaType] = useState(''); // 'image' or 'video'
@@ -11,9 +10,14 @@ const FileUpload = () => {
     const [message, setMessage] = useState('');
     const [serverStatus, setServerStatus] = useState('checking');
     const [currentSessionId, setCurrentSessionId] = useState(null);
-    const [processingMode, setProcessingMode] = useState('file'); // 'file' or 'youtube'
     const fileInputRef = useRef(null);
     const [error, setError] = useState('');
+    
+    // Training data extraction state
+    const [extractingTrainingData, setExtractingTrainingData] = useState(false);
+    const [showTrainingExtraction, setShowTrainingExtraction] = useState(false);
+    const [confidenceThreshold, setConfidenceThreshold] = useState(0.3);
+    const [trainingDataResult, setTrainingDataResult] = useState(null);
 
     // Test server connection on component mount
     useEffect(() => {
@@ -73,24 +77,137 @@ const FileUpload = () => {
         }
     };
 
-    const handleYoutubeUrlChange = (event) => {
-        setYoutubeUrl(event.target.value);
-        if (event.target.value.trim()) {
-            setFile(null); // Clear file when YouTube URL is entered
-            if (fileInputRef.current) {
-                fileInputRef.current.value = '';
-            }
-            setProcessingMode('youtube');
-        }
-    };
-
     const handleUpload = async () => {
-        if (processingMode === 'file') {
-            await handleFileUpload();
-        } else if (processingMode === 'youtube') {
-            await handleYoutubeUpload();
+        if (!file) {
+            alert('Please select a file first');
+            return;
+        }
+
+        console.log('🚀 Starting file upload process...');
+
+        // File validation
+        const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+        const validVideoTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/webm'];
+        const maxSize = 75 * 1024 * 1024; // 75MB
+        const fileSizeMB = file.size / (1024 * 1024);
+
+        if (file.size > maxSize) {
+            alert('File too large! Maximum size is 75MB.');
+            return;
+        }
+
+        if (!validImageTypes.includes(file.type) && !validVideoTypes.includes(file.type)) {
+            alert('Invalid file type! Please select JPG, PNG, WEBP images or MP4, AVI, MOV, WEBM videos.');
+            return;
+        }
+
+        setLoading(true);
+        const currentMediaType = file.type.startsWith('video/') ? 'video' : 'image';
+        setMediaType(currentMediaType);
+        
+        // Dynamic message based on file size
+        if (currentMediaType === 'video') {
+            if (fileSizeMB > 50) {
+                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 20-30 minutes. Please be patient and keep this tab open...`);
+            } else if (fileSizeMB > 30) {
+                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 15-20 minutes. Please wait...`);
+            } else if (fileSizeMB > 15) {
+                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 8-12 minutes. Please wait...`);
+            } else {
+                setMessage('🔄 Processing video... This may take 3-8 minutes depending on video length. Please wait...');
+            }
         } else {
-            alert('Please select a file or enter a YouTube URL');
+            setMessage(`🔄 Processing ${currentMediaType}...`);
+        }
+
+        const formData = new FormData();
+        formData.append('file', file);
+
+        try {
+            let response;
+            
+            // Use chunked upload for files > 25MB
+            if (fileSizeMB > 25) {
+                console.log('🔄 Using chunked upload for large file...');
+                const { processResponse, controller } = await uploadLargeFile(file);
+                response = processResponse;
+            } else {
+                console.log('🔄 Using standard upload...');
+                response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+            }
+            
+            console.log('📡 Response received - Status:', response.status);
+            console.log('📡 Response headers:', [...response.headers.entries()]);
+
+            if (!response.ok) {
+                let errorMessage;
+                try {
+                    const errorData = await response.json();
+                    errorMessage = errorData.error || `HTTP ${response.status}`;
+                } catch {
+                    const errorText = await response.text();
+                    errorMessage = errorText || `HTTP ${response.status}`;
+                }
+                throw new Error(errorMessage);
+            }
+
+            const data = await response.json();
+            console.log('✅ File processing completed successfully');
+            console.log('📊 Response data:', data);
+            
+            // Handle chunked download response
+            if (data.chunked_download) {
+                console.log('🔄 Processing chunked download response...');
+                setMessage('📥 Downloading processed results...');
+                
+                // Download original file in chunks
+                const originalUrl = await downloadFileInChunks(data.original_file, 'original');
+                
+                // Download processed file in chunks  
+                const processedUrl = await downloadFileInChunks(data.processed_file, 'processed');
+                
+                setOriginalMedia(originalUrl);
+                setProcessedMedia(processedUrl);
+                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb}MB) - Downloaded via chunked transfer`);
+                
+            } else {
+                // Handle regular response (for smaller files)
+                setOriginalMedia(data.original_file || data.original);
+                setProcessedMedia(data.output_file || data.processed);
+                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb || fileSizeMB.toFixed(1)}MB)`);
+            }
+            
+        } catch (error) {
+            console.error('❌ File upload failed:', error);
+            console.error('❌ Error details:', {
+                name: error.name,
+                message: error.message,
+                stack: error.stack
+            });
+            
+            // Enhanced error handling for different scenarios
+            if (error.name === 'AbortError') {
+                setMessage(`❌ Request timed out. Large files (${fileSizeMB.toFixed(1)}MB) need more time. Please try with a smaller file or check your connection.`);
+            } else if (error.message.includes('NetworkError') || error.message.includes('fetch')) {
+                setMessage('❌ Network error. Please check your internet connection and try again.');
+            } else if (error.message.includes('CORS')) {
+                setMessage('❌ Server configuration error (CORS). Please contact support.');
+            } else if (error.message.includes('too large for response') || error.message.includes('Cloud Run limit')) {
+                setMessage(`❌ ${error.message} The video was processed but the result is too large to display. Try with a shorter video (under 20MB).`);
+            } else if (error.message.includes('File too large for processing')) {
+                setMessage(`❌ ${error.message} Please compress your video or try with a shorter clip.`);
+            } else if (error.message.includes('413')) {
+                setMessage('❌ File or response too large. Please try with a smaller file (under 20MB for videos).');
+            } else if (error.message.includes('Failed to download chunk')) {
+                setMessage(`❌ Download failed: ${error.message}. The video was processed but couldn't be downloaded. Please try again.`);
+            } else {
+                setMessage(`❌ Error: ${error.message}`);
+            }
+        } finally {
+            setLoading(false);
         }
     };
 
@@ -329,187 +446,74 @@ const FileUpload = () => {
         return { processResponse, controller };
     };
 
-    const handleFileUpload = async () => {
+    const handleTrainingDataExtraction = async () => {
         if (!file) {
             alert('Please select a file first');
             return;
         }
 
-        console.log('🚀 Starting file upload process...');
-
-        // File validation
-        const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-        const validVideoTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/webm'];
-        const maxSize = 75 * 1024 * 1024; // 75MB
-        const fileSizeMB = file.size / (1024 * 1024);
-
-        if (file.size > maxSize) {
-            alert('File too large! Maximum size is 75MB.');
-            return;
-        }
-
-        if (!validImageTypes.includes(file.type) && !validVideoTypes.includes(file.type)) {
-            alert('Invalid file type! Please select JPG, PNG, WEBP images or MP4, AVI, MOV, WEBM videos.');
-            return;
-        }
-
-        setLoading(true);
-        const currentMediaType = file.type.startsWith('video/') ? 'video' : 'image';
-        setMediaType(currentMediaType);
-        
-        // Dynamic message based on file size
-        if (currentMediaType === 'video') {
-            if (fileSizeMB > 50) {
-                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 20-30 minutes. Please be patient and keep this tab open...`);
-            } else if (fileSizeMB > 30) {
-                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 15-20 minutes. Please wait...`);
-            } else if (fileSizeMB > 15) {
-                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 8-12 minutes. Please wait...`);
-            } else {
-                setMessage('🔄 Processing video... This may take 3-8 minutes depending on video length. Please wait...');
-            }
-        } else {
-            setMessage(`🔄 Processing ${currentMediaType}...`);
-        }
-
-        const formData = new FormData();
-        formData.append('file', file);
+        setExtractingTrainingData(true);
+        setMessage('🎯 Extracting training data...');
+        setError('');
+        setTrainingDataResult(null);
 
         try {
-            let response;
-            
-            // Use chunked upload for files > 25MB
-            if (fileSizeMB > 25) {
-                console.log('🔄 Using chunked upload for large file...');
-                const { processResponse, controller } = await uploadLargeFile(file);
-                response = processResponse;
-            } else {
-                console.log('🔄 Using standard upload...');
-                response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-            }
-            
-            console.log('📡 Response received - Status:', response.status);
-            console.log('📡 Response headers:', [...response.headers.entries()]);
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('confidence', confidenceThreshold.toString());
 
-            if (!response.ok) {
-                let errorMessage;
-                try {
-                    const errorData = await response.json();
-                    errorMessage = errorData.error || `HTTP ${response.status}`;
-                } catch {
-                    const errorText = await response.text();
-                    errorMessage = errorText || `HTTP ${response.status}`;
-                }
-                throw new Error(errorMessage);
-            }
+            console.log(`🎯 Starting training data extraction with confidence ${confidenceThreshold}`);
 
-            const data = await response.json();
-            console.log('✅ File processing completed successfully');
-            console.log('📊 Response data:', data);
-            
-            // Handle chunked download response
-            if (data.chunked_download) {
-                console.log('🔄 Processing chunked download response...');
-                setMessage('📥 Downloading processed results...');
-                
-                // Download original file in chunks
-                const originalUrl = await downloadFileInChunks(data.original_file, 'original');
-                
-                // Download processed file in chunks  
-                const processedUrl = await downloadFileInChunks(data.processed_file, 'processed');
-                
-                setOriginalMedia(originalUrl);
-                setProcessedMedia(processedUrl);
-                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb}MB) - Downloaded via chunked transfer`);
-                
-            } else {
-                // Handle regular response (for smaller files)
-                setOriginalMedia(data.original_file || data.original);
-                setProcessedMedia(data.output_file || data.processed);
-                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb || fileSizeMB.toFixed(1)}MB)`);
-            }
-            
-        } catch (error) {
-            console.error('❌ File upload failed:', error);
-            console.error('❌ Error details:', {
-                name: error.name,
-                message: error.message,
-                stack: error.stack
-            });
-            
-            // Enhanced error handling for different scenarios
-            if (error.name === 'AbortError') {
-                setMessage(`❌ Request timed out. Large files (${fileSizeMB.toFixed(1)}MB) need more time. Please try with a smaller file or check your connection.`);
-            } else if (error.message.includes('NetworkError') || error.message.includes('fetch')) {
-                setMessage('❌ Network error. Please check your internet connection and try again.');
-            } else if (error.message.includes('CORS')) {
-                setMessage('❌ Server configuration error (CORS). Please contact support.');
-            } else if (error.message.includes('too large for response') || error.message.includes('Cloud Run limit')) {
-                setMessage(`❌ ${error.message} The video was processed but the result is too large to display. Try with a shorter video (under 20MB).`);
-            } else if (error.message.includes('File too large for processing')) {
-                setMessage(`❌ ${error.message} Please compress your video or try with a shorter clip.`);
-            } else if (error.message.includes('413')) {
-                setMessage('❌ File or response too large. Please try with a smaller file (under 20MB for videos).');
-            } else if (error.message.includes('Failed to download chunk')) {
-                setMessage(`❌ Download failed: ${error.message}. The video was processed but couldn't be downloaded. Please try again.`);
-            } else {
-                setMessage(`❌ Error: ${error.message}`);
-            }
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    const handleYoutubeUpload = async () => {
-        if (!youtubeUrl.trim()) {
-            alert('Please enter a YouTube URL first');
-            return;
-        }
-
-        console.log('🔗 Starting YouTube video processing...');
-
-        setLoading(true);
-        setMediaType('video');
-        setMessage('Downloading and processing YouTube video... This may take several minutes, please wait...');
-
-        try {
-            console.log('📤 Sending YouTube URL to server...');
-            
-            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/youtube', {
+            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/extract-training-data', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({ url: youtubeUrl }),
-                signal: AbortSignal.timeout(900000) // 15 minutes timeout for YouTube processing
+                body: formData,
+                mode: 'cors'
             });
+
+            console.log('📡 Training extraction response status:', response.status);
 
             if (!response.ok) {
                 const errorData = await response.json();
-                throw new Error(errorData.error || 'YouTube processing failed');
+                console.error('❌ Training extraction error:', errorData);
+                throw new Error(errorData.error || errorData.message || 'Training data extraction failed');
             }
 
-            const data = await response.json();
-            console.log('✅ YouTube video processing completed successfully');
-            
-            setOriginalMedia(data.original_file);
-            setProcessedMedia(data.output_file);
-            setMessage(data.message);
-            
+            const result = await response.json();
+            console.log('✅ Training extraction successful:', result);
+
+            setTrainingDataResult(result);
+            setMessage(`✅ Training data extracted: ${result.extracted_count} samples (${result.dataset_size_mb}MB)`);
+
         } catch (error) {
-            console.error('❌ YouTube processing failed:', error);
-            if (error.name === 'AbortError') {
-                setMessage('Error: Request timed out. Please try with a shorter video.');
-            } else if (error.name === 'TypeError' && error.message.includes('fetch')) {
-                setMessage('Error: Cannot connect to server. Please make sure the backend is running.');
-            } else {
-                setMessage(`Error: ${error.message}`);
-            }
+            console.error('❌ Error extracting training data:', error);
+            setError(error.message || 'Failed to extract training data. Please try again.');
+            setMessage('');
         } finally {
-            setLoading(false);
+            setExtractingTrainingData(false);
+        }
+    };
+
+    const downloadTrainingData = () => {
+        if (!trainingDataResult?.dataset_zip) {
+            alert('No training data available for download');
+            return;
+        }
+
+        try {
+            // Create download link
+            const link = document.createElement('a');
+            link.href = trainingDataResult.dataset_zip;
+            link.download = `drone_training_dataset_${new Date().toISOString().slice(0, 10)}.zip`;
+            
+            // Trigger download
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            console.log('📥 Training dataset download initiated');
+        } catch (error) {
+            console.error('❌ Error downloading training data:', error);
+            alert('Failed to download training data');
         }
     };
 
@@ -674,48 +678,6 @@ const FileUpload = () => {
             borderRadius: '50%',
             animation: 'spin 1s linear infinite'
         },
-        divider: {
-            textAlign: 'center',
-            margin: '2rem 0',
-            position: 'relative'
-        },
-        dividerLine: {
-            position: 'absolute',
-            top: '50%',
-            left: '0',
-            right: '0',
-            height: '1px',
-            backgroundColor: '#e2e8f0'
-        },
-        dividerText: {
-            backgroundColor: '#f8fafc',
-            padding: '0 1rem',
-            color: '#64748b',
-            fontWeight: '500',
-            fontSize: '0.875rem'
-        },
-        youtubeSection: {
-            margin: '20px 0',
-            backgroundColor: '#ffffff',
-            borderRadius: '12px',
-            padding: '2rem',
-            boxShadow: '0 1px 3px 0 rgba(0, 0, 0, 0.1)',
-            border: '1px solid #e2e8f0'
-        },
-        youtubeInput: {
-            width: '100%',
-            padding: '12px',
-            border: '2px solid #ddd',
-            borderRadius: '8px',
-            fontSize: '16px',
-            marginBottom: '10px',
-            boxSizing: 'border-box'
-        },
-        youtubeHelp: {
-            fontSize: '14px',
-            color: '#666',
-            margin: '0'
-        },
         message: {
             padding: '1rem',
             borderRadius: '8px',
@@ -771,6 +733,94 @@ const FileUpload = () => {
             cursor: 'pointer',
             transition: 'all 0.2s ease',
             width: '100%'
+        },
+        // Training data extraction styles
+        trainingSection: {
+            backgroundColor: '#f8f4ff',
+            borderRadius: '12px',
+            padding: '2rem',
+            margin: '2rem 0',
+            border: '2px solid #e0e7ff'
+        },
+        trainingHeader: {
+            fontSize: '1.5rem',
+            fontWeight: '700',
+            color: '#5b21b6',
+            marginBottom: '1rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem'
+        },
+        trainingDescription: {
+            fontSize: '0.875rem',
+            color: '#6b7280',
+            marginBottom: '1.5rem',
+            lineHeight: '1.5'
+        },
+        sliderContainer: {
+            marginBottom: '1.5rem'
+        },
+        sliderLabel: {
+            display: 'block',
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            color: '#374151',
+            marginBottom: '0.5rem'
+        },
+        slider: {
+            width: '100%',
+            height: '6px',
+            borderRadius: '3px',
+            background: '#e2e8f0',
+            outline: 'none',
+            appearance: 'none'
+        },
+        sliderValue: {
+            fontSize: '0.75rem',
+            color: '#6b7280',
+            marginTop: '0.25rem'
+        },
+        extractButton: {
+            backgroundColor: '#7c3aed',
+            color: '#ffffff',
+            fontSize: '1rem',
+            fontWeight: '600',
+            padding: '0.75rem 2rem',
+            borderRadius: '8px',
+            border: 'none',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '0.5rem',
+            width: '100%',
+            transition: 'all 0.2s ease',
+            marginBottom: '1rem'
+        },
+        toggleButton: {
+            backgroundColor: '#6366f1',
+            color: '#ffffff',
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            padding: '0.5rem 1rem',
+            borderRadius: '6px',
+            border: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease',
+            marginBottom: '2rem'
+        },
+        trainingResult: {
+            backgroundColor: '#dcfce7',
+            border: '1px solid #bbf7d0',
+            borderRadius: '8px',
+            padding: '1rem',
+            marginTop: '1rem'
+        },
+        trainingResultText: {
+            color: '#166534',
+            fontSize: '0.875rem',
+            fontWeight: '500',
+            marginBottom: '0.5rem'
         }
     };
 
@@ -814,6 +864,59 @@ const FileUpload = () => {
                     
                     .media:hover {
                         transform: scale(1.02);
+                    }
+                    
+                    .extract-button:hover:not(:disabled) {
+                        background-color: #6d28d9;
+                        transform: translateY(-1px);
+                        box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2);
+                    }
+                    
+                    .toggle-button:hover {
+                        background-color: #4f46e5;
+                        transform: translateY(-1px);
+                    }
+                    
+                    input[type="range"] {
+                        -webkit-appearance: none;
+                        appearance: none;
+                        background: transparent;
+                        cursor: pointer;
+                    }
+                    
+                    input[type="range"]::-webkit-slider-track {
+                        background: #e2e8f0;
+                        height: 6px;
+                        border-radius: 3px;
+                    }
+                    
+                    input[type="range"]::-webkit-slider-thumb {
+                        -webkit-appearance: none;
+                        appearance: none;
+                        height: 20px;
+                        width: 20px;
+                        border-radius: 50%;
+                        background: #7c3aed;
+                        cursor: pointer;
+                        border: 2px solid #ffffff;
+                        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+                    }
+                    
+                    input[type="range"]::-moz-range-track {
+                        background: #e2e8f0;
+                        height: 6px;
+                        border-radius: 3px;
+                        border: none;
+                    }
+                    
+                    input[type="range"]::-moz-range-thumb {
+                        height: 20px;
+                        width: 20px;
+                        border-radius: 50%;
+                        background: #7c3aed;
+                        cursor: pointer;
+                        border: 2px solid #ffffff;
+                        box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
                     }
                 `}
             </style>
@@ -876,39 +979,89 @@ const FileUpload = () => {
                         
                         <button 
                             onClick={handleUpload}
-                            disabled={loading || (!file && !youtubeUrl.trim())}
+                            disabled={loading || (!file)}
                             style={styles.uploadButton}
                             className="upload-button"
                         >
                             {loading && <span style={styles.loadingSpinner}></span>}
-                            {loading ? `Processing ${mediaType}...` : 
-                             processingMode === 'youtube' ? '🔗 Process YouTube Video' : 
-                             '📤 Analyze File'}
+                            {loading ? `Processing ${mediaType}...` : '📤 Analyze File'}
                         </button>
                     </div>
                 </div>
 
-                {/* OR Divider */}
-                <div style={styles.divider}>
-                    <div style={styles.dividerLine}></div>
-                    <span style={styles.dividerText}>OR</span>
-                </div>
+                {/* Training Data Extraction Section */}
+                <div style={styles.uploadCard}>
+                    <button 
+                        onClick={() => setShowTrainingExtraction(!showTrainingExtraction)}
+                        style={styles.toggleButton}
+                        className="toggle-button"
+                    >
+                        {showTrainingExtraction ? '🔼 Hide Training Data Extraction' : '🔽 Show Training Data Extraction'}
+                    </button>
 
-                {/* YouTube URL Section */}
-                <div style={styles.youtubeSection}>
-                    <h3 style={{ fontSize: '1.25rem', fontWeight: '600', color: '#1e293b', marginBottom: '1rem' }}>
-                        🔗 YouTube Video URL
-                    </h3>
-                    <input
-                        type="url"
-                        value={youtubeUrl}
-                        onChange={handleYoutubeUrlChange}
-                        placeholder="https://www.youtube.com/watch?v=... or https://youtu.be/..."
-                        style={styles.youtubeInput}
-                    />
-                    <p style={styles.youtubeHelp}>
-                        Supports: YouTube videos, YouTube Shorts, and various URL formats
-                    </p>
+                    {showTrainingExtraction && (
+                        <div style={styles.trainingSection}>
+                            <h3 style={styles.trainingHeader}>
+                                🎯 Extract Training Dataset
+                            </h3>
+                            <p style={styles.trainingDescription}>
+                                Generate a YOLO format training dataset from your uploaded file. This will extract frames with 
+                                drone detections and create properly formatted annotation files for training your own models.
+                            </p>
+
+                            <div style={styles.sliderContainer}>
+                                <label style={styles.sliderLabel}>
+                                    Confidence Threshold: {confidenceThreshold.toFixed(1)}
+                                </label>
+                                <input
+                                    type="range"
+                                    min="0.1"
+                                    max="0.9"
+                                    step="0.1"
+                                    value={confidenceThreshold}
+                                    onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))}
+                                    style={styles.slider}
+                                />
+                                <div style={styles.sliderValue}>
+                                    Higher values extract only high-confidence detections
+                                </div>
+                            </div>
+
+                            <button 
+                                onClick={handleTrainingDataExtraction}
+                                disabled={extractingTrainingData || !file}
+                                style={{
+                                    ...styles.extractButton,
+                                    opacity: (extractingTrainingData || !file) ? 0.6 : 1,
+                                    cursor: (extractingTrainingData || !file) ? 'not-allowed' : 'pointer'
+                                }}
+                                className="extract-button"
+                            >
+                                {extractingTrainingData && <span style={styles.loadingSpinner}></span>}
+                                {extractingTrainingData ? 'Extracting Training Data...' : '📦 Extract Training Dataset'}
+                            </button>
+
+                            {trainingDataResult && (
+                                <div style={styles.trainingResult}>
+                                    <div style={styles.trainingResultText}>
+                                        ✅ Extraction Complete: {trainingDataResult.extracted_count} samples
+                                    </div>
+                                    <div style={styles.trainingResultText}>
+                                        Dataset Size: {trainingDataResult.dataset_size_mb}MB
+                                    </div>
+                                    <div style={styles.trainingResultText}>
+                                        Confidence Used: {trainingDataResult.confidence_threshold}
+                                    </div>
+                                    <button 
+                                        onClick={downloadTrainingData}
+                                        style={styles.downloadButton}
+                                    >
+                                        📥 Download Training Dataset
+                                    </button>
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
 
                 {/* Message */}

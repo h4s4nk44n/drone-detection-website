@@ -933,6 +933,118 @@ def debug_temp_files():
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response, 500
 
+@app.route('/api/extract-training-data', methods=['POST'])
+def extract_training_data():
+    """Extract YOLO format training data from uploaded file"""
+    try:
+        print("🎯 Training data extraction endpoint reached")
+        
+        # Cleanup old files first
+        cleanup_old_files()
+        
+        if 'file' not in request.files:
+            return jsonify({"error": "No file uploaded"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No file selected"}), 400
+        
+        # Read file data
+        file_data = file.read()
+        file_size_mb = len(file_data) / (1024 * 1024)
+        
+        # File size check
+        if file_size_mb > 100:  # Increased limit for training data extraction
+            return jsonify({"error": f"File too large. Maximum size is 100MB for training data extraction."}), 400
+        
+        print(f"📁 File uploaded for training extraction: {file.filename} ({file_size_mb:.2f}MB)")
+        
+        # Get file extension
+        file_ext = os.path.splitext(file.filename)[1].lower()
+        
+        # File type validation
+        allowed_extensions = {'.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.webm'}
+        if file_ext not in allowed_extensions:
+            return jsonify({"error": f"Unsupported file type: {file_ext}"}), 400
+        
+        # Get confidence threshold from request (optional)
+        confidence_threshold = float(request.form.get('confidence', 0.3))
+        if confidence_threshold < 0.1 or confidence_threshold > 0.9:
+            confidence_threshold = 0.3
+        
+        print(f"🎯 Extracting training data with confidence threshold: {confidence_threshold}")
+        
+        # Process file and extract training data using the existing processing function
+        print("🤖 Starting processing with training data extraction...")
+        
+        try:
+            # Use the modified process_file_in_memory with training data extraction enabled
+            result = process_file_in_memory(
+                file_data, file_ext, file.filename, model, 
+                extract_training_data=True, 
+                confidence_threshold=confidence_threshold
+            )
+            
+            # Unpack the result
+            if len(result) == 5:  # With training data
+                original_base64, processed_base64, mime_type, zip_data, extracted_count = result
+            else:  # No training data extracted
+                original_base64, processed_base64, mime_type = result
+                zip_data = None
+                extracted_count = 0
+            
+            if extracted_count == 0:
+                return jsonify({
+                    "error": "No drone detections found in the uploaded file. Training data extraction requires files with visible drones.",
+                    "suggestion": "Try uploading a different file that contains drones, or lower the confidence threshold.",
+                    "confidence_used": confidence_threshold
+                }), 400
+            
+            print(f"✅ Training data extraction complete: {extracted_count} samples")
+            
+            # Convert ZIP to base64 for download
+            zip_base64 = base64.b64encode(zip_data).decode('utf-8')
+            
+            return jsonify({
+                "message": f"Training data extracted successfully: {extracted_count} samples",
+                "extracted_count": extracted_count,
+                "confidence_threshold": confidence_threshold,
+                "file_size_mb": round(file_size_mb, 2),
+                "dataset_zip": f"data:application/zip;base64,{zip_base64}",
+                "dataset_size_mb": round(len(zip_data) / (1024 * 1024), 2)
+            })
+            
+        except Exception as processing_error:
+            print(f"❌ Training data extraction failed: {str(processing_error)}")
+            
+            # Enhanced error messages
+            error_msg = str(processing_error)
+            if "No drone detections found" in error_msg:
+                return jsonify({
+                    "error": "No drone detections found in the uploaded file.",
+                    "suggestion": "Make sure your file contains visible drones, or try lowering the confidence threshold.",
+                    "confidence_used": confidence_threshold
+                }), 400
+            elif "Could not open video" in error_msg:
+                return jsonify({
+                    "error": "Unable to process the video file.",
+                    "suggestion": "Try uploading in a different video format (MP4 recommended)."
+                }), 400
+            elif "Could not load image" in error_msg:
+                return jsonify({
+                    "error": "Unable to process the image file.",
+                    "suggestion": "Try uploading in a different image format (JPG/PNG recommended)."
+                }), 400
+            else:
+                return jsonify({
+                    "error": f"Training data extraction failed: {error_msg}"
+                }), 500
+        
+    except Exception as e:
+        print(f"❌ Error in extract_training_data endpoint: {str(e)}")
+        traceback.print_exc()
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
 if __name__ == '__main__':
     # Get port from environment (Google Cloud Run sets PORT automatically)
     port = int(os.environ.get('PORT', 8080))  # Changed default to 8080

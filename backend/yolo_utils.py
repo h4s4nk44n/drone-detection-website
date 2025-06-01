@@ -9,6 +9,9 @@ import numpy as np
 import yt_dlp
 import subprocess
 import gc
+import yaml
+import re
+import time
 
 YOLO_PROCESSING_SIZE = 832  # High accuracy processing for all media
 
@@ -208,12 +211,20 @@ def process_video_manual(input_path, output_path, model):
     else:
         raise Exception(f"Output video file was not created: {output_path}")
 
-def process_file_in_memory(file_data, file_ext, filename, model):
+def process_file_in_memory(file_data, file_ext, filename, model, extract_training_data=False, confidence_threshold=0.3):
     """
     Process file in memory with proper MIME types for web compatibility
     Enhanced with FFmpeg fallback for reliable video processing
+    Optionally extract training data with YOLO format labels
     """
     print(f"🔄 Processing file in memory: {filename}")
+    if extract_training_data:
+        print(f"🎯 Training data extraction enabled with confidence threshold: {confidence_threshold}")
+    
+    # Training data extraction setup
+    training_images = []
+    training_labels = []
+    extracted_count = 0
     
     # Create temporary files
     with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_input:
@@ -315,10 +326,59 @@ def process_file_in_memory(file_data, file_ext, filename, model):
                                     # ONNX model
                                     detections = model.predict(frame_resized)
                                     processed_frame = model.draw_detections(frame_resized, detections)
+                                    
+                                    # Extract training data for ONNX model if needed
+                                    if extract_training_data:
+                                        # Convert ONNX detections to training data format
+                                        # Note: This is a simplified version - may need adjustment based on ONNX output format
+                                        for detection in detections:
+                                            if detection['confidence'] >= confidence_threshold:
+                                                # Use original resolution frame for training data
+                                                original_frame = cv2.resize(frame, (width, height))
+                                                training_images.append(original_frame.copy())
+                                                
+                                                # Create YOLO format label (simplified)
+                                                # Format: class_id center_x center_y width height (normalized)
+                                                x1, y1, x2, y2 = detection['bbox']
+                                                center_x = (x1 + x2) / 2 / width
+                                                center_y = (y1 + y2) / 2 / height
+                                                bbox_width = (x2 - x1) / width
+                                                bbox_height = (y2 - y1) / height
+                                                
+                                                # Assuming class 0 for drone (adjust based on your model)
+                                                label = f"0 {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                                                training_labels.append(label)
+                                                extracted_count += 1
                                 else:
                                     # PyTorch model
                                     results = model.predict(frame_resized, verbose=False)
                                     processed_frame = results[0].plot()
+                                    
+                                    # Extract training data for PyTorch model if needed
+                                    if extract_training_data:
+                                        boxes = results[0].boxes
+                                        if boxes is not None and len(boxes) > 0:
+                                            # Filter by confidence
+                                            confident_boxes = boxes[boxes.conf >= confidence_threshold]
+                                            if len(confident_boxes) > 0:
+                                                # Use original resolution frame for training data
+                                                original_frame = cv2.resize(frame, (width, height))
+                                                training_images.append(original_frame.copy())
+                                                
+                                                # Take the most confident detection
+                                                best_box = confident_boxes[confident_boxes.conf.argmax()]
+                                                
+                                                # Convert to YOLO format (normalized coordinates)
+                                                x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
+                                                center_x = (x1 + x2) / 2 / width
+                                                center_y = (y1 + y2) / 2 / height
+                                                bbox_width = (x2 - x1) / width
+                                                bbox_height = (y2 - y1) / height
+                                                class_id = int(best_box.cls.cpu().numpy())
+                                                
+                                                label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                                                training_labels.append(label)
+                                                extracted_count += 1
                                 
                                 # Write frame
                                 write_success = out.write(processed_frame)
@@ -329,7 +389,8 @@ def process_file_in_memory(file_data, file_ext, filename, model):
                                 # Progress update
                                 if processed_count % 50 == 0:
                                     progress = (frame_count / total_frames) * 100
-                                    print(f"📊 OpenCV Progress: {progress:.1f}% ({processed_count}/{total_frames} frames)")
+                                    extraction_info = f", extracted: {extracted_count}" if extract_training_data else ""
+                                    print(f"📊 OpenCV Progress: {progress:.1f}% ({processed_count}/{total_frames} frames{extraction_info})")
                                     
                                 # Memory cleanup
                                 if processed_count % 100 == 0:
@@ -366,13 +427,15 @@ def process_file_in_memory(file_data, file_ext, filename, model):
                 if os.path.exists(temp_output_path):
                     os.unlink(temp_output_path)
                 
-                # Use FFmpeg fallback
+                # Use FFmpeg fallback (Note: training data extraction not supported in FFmpeg fallback)
                 try:
                     processed_output = process_video_with_ffmpeg(temp_input_path, temp_output_path, model)
                     if os.path.exists(processed_output) and os.path.getsize(processed_output) > 1024:
                         temp_output_path = processed_output
                         processed_successfully = True
                         print("✅ FFmpeg video processing complete")
+                        if extract_training_data:
+                            print("⚠️ Training data extraction not available with FFmpeg fallback")
                     else:
                         raise Exception("FFmpeg output file invalid")
                         
@@ -394,11 +457,18 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             print(f"✅ Video processing complete:")
             print(f"   - Method: {'OpenCV' if opencv_error is None else 'FFmpeg'}")
             print(f"   - Output size: {len(processed_video_data) / (1024*1024):.2f}MB")
+            if extract_training_data:
+                print(f"   - Training samples extracted: {extracted_count}")
             
-            return original_base64, processed_base64, 'video/mp4'
+            # Return with or without training data
+            if extract_training_data and extracted_count > 0:
+                zip_data = create_training_dataset_zip(training_images, training_labels, filename)
+                return original_base64, processed_base64, 'video/mp4', zip_data, extracted_count
+            else:
+                return original_base64, processed_base64, 'video/mp4'
             
         else:
-            # Image processing (unchanged)
+            # Image processing
             print(f"🖼️ Processing image: {filename}")
             
             # Load image
@@ -411,10 +481,53 @@ def process_file_in_memory(file_data, file_ext, filename, model):
                 # ONNX model
                 detections = model.predict(image)
                 processed_image = model.draw_detections(image, detections)
+                
+                # Extract training data for ONNX model if needed
+                if extract_training_data:
+                    for detection in detections:
+                        if detection['confidence'] >= confidence_threshold:
+                            training_images.append(image.copy())
+                            
+                            # Create YOLO format label
+                            x1, y1, x2, y2 = detection['bbox']
+                            img_height, img_width = image.shape[:2]
+                            center_x = (x1 + x2) / 2 / img_width
+                            center_y = (y1 + y2) / 2 / img_height
+                            bbox_width = (x2 - x1) / img_width
+                            bbox_height = (y2 - y1) / img_height
+                            
+                            label = f"0 {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                            training_labels.append(label)
+                            extracted_count += 1
             else:
                 # PyTorch model
                 results = model.predict(image, verbose=False)
                 processed_image = results[0].plot()
+                
+                # Extract training data for PyTorch model if needed
+                if extract_training_data:
+                    boxes = results[0].boxes
+                    if boxes is not None and len(boxes) > 0:
+                        # Filter by confidence
+                        confident_boxes = boxes[boxes.conf >= confidence_threshold]
+                        if len(confident_boxes) > 0:
+                            training_images.append(image.copy())
+                            
+                            # Take the most confident detection
+                            best_box = confident_boxes[confident_boxes.conf.argmax()]
+                            
+                            # Convert to YOLO format
+                            x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
+                            img_height, img_width = image.shape[:2]
+                            center_x = (x1 + x2) / 2 / img_width
+                            center_y = (y1 + y2) / 2 / img_height
+                            bbox_width = (x2 - x1) / img_width
+                            bbox_height = (y2 - y1) / img_height
+                            class_id = int(best_box.cls.cpu().numpy())
+                            
+                            label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                            training_labels.append(label)
+                            extracted_count += 1
             
             # Convert to bytes
             _, buffer = cv2.imencode('.jpg', image)
@@ -427,7 +540,16 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             original_base64 = base64.b64encode(original_bytes).decode('utf-8')
             processed_base64 = base64.b64encode(processed_bytes).decode('utf-8')
             
-            return original_base64, processed_base64, 'image/jpeg'
+            print(f"✅ Image processing complete")
+            if extract_training_data:
+                print(f"   - Training samples extracted: {extracted_count}")
+            
+            # Return with or without training data
+            if extract_training_data and extracted_count > 0:
+                zip_data = create_training_dataset_zip(training_images, training_labels, filename)
+                return original_base64, processed_base64, 'image/jpeg', zip_data, extracted_count
+            else:
+                return original_base64, processed_base64, 'image/jpeg'
     
     finally:
         # Cleanup temp files
@@ -435,6 +557,107 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             os.unlink(temp_input_path)
         if 'temp_output_path' in locals() and os.path.exists(temp_output_path):
             os.unlink(temp_output_path)
+
+def create_training_dataset_zip(training_images, training_labels, original_filename):
+    """
+    Create a ZIP file containing training images and YOLO format labels
+    """
+    import zipfile
+    from io import BytesIO
+    import yaml
+    import re
+    
+    print(f"📦 Creating training dataset ZIP with {len(training_images)} samples...")
+    
+    # Create a safe filename prefix from the original filename
+    # Remove file extension and replace spaces/special chars with underscores
+    base_name = os.path.splitext(original_filename)[0]
+    safe_name = re.sub(r'[^a-zA-Z0-9_-]', '_', base_name)
+    safe_name = re.sub(r'_+', '_', safe_name)  # Replace multiple underscores with single
+    safe_name = safe_name.strip('_')  # Remove leading/trailing underscores
+    
+    if not safe_name:  # Fallback if filename becomes empty
+        safe_name = "drone_dataset"
+    
+    print(f"📋 Using base name: '{safe_name}' (from '{original_filename}')")
+    
+    # Create in-memory ZIP file
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Create images and labels directories
+        for i, (image, label) in enumerate(zip(training_images, training_labels)):
+            # Create unique filenames using the original filename
+            image_filename = f"images/{safe_name}_{i:06d}.jpg"
+            label_filename = f"labels/{safe_name}_{i:06d}.txt"
+            
+            # Save image
+            _, buffer = cv2.imencode('.jpg', image)
+            zip_file.writestr(image_filename, buffer.tobytes())
+            
+            # Save label
+            zip_file.writestr(label_filename, label)
+        
+        # Create dataset.yaml file for YOLO training
+        dataset_config = {
+            'path': './dataset',
+            'train': 'images',
+            'val': 'images',  # Same as train for this extracted dataset
+            'nc': 1,  # Number of classes (assuming drone detection)
+            'names': ['drone']  # Class names
+        }
+        
+        yaml_content = yaml.dump(dataset_config, default_flow_style=False)
+        zip_file.writestr('dataset.yaml', yaml_content)
+        
+        # Create README file
+        readme_content = f"""# Drone Detection Training Dataset
+
+This dataset was automatically extracted from: {original_filename}
+
+## Contents:
+- images/: Training images with drone detections ({len(training_images)} files)
+- labels/: YOLO format annotation files ({len(training_labels)} files)
+- dataset.yaml: Dataset configuration for YOLO training
+
+## Dataset Statistics:
+- Total samples: {len(training_images)}
+- Image format: JPG
+- Label format: YOLO (class_id center_x center_y width height - normalized coordinates)
+- Filename pattern: {safe_name}_XXXXXX.jpg/.txt
+
+## YOLO Format Details:
+Each .txt file contains one line per detection:
+- class_id: 0 (drone)
+- center_x: Normalized x-coordinate of bounding box center (0.0-1.0)
+- center_y: Normalized y-coordinate of bounding box center (0.0-1.0)
+- width: Normalized width of bounding box (0.0-1.0)
+- height: Normalized height of bounding box (0.0-1.0)
+
+## Usage:
+1. Extract this ZIP file
+2. Use with YOLO training frameworks like Ultralytics YOLOv11
+3. Update dataset.yaml paths as needed for your environment
+
+Example training command:
+```bash
+yolo train data=dataset.yaml model=yolo11n.pt epochs=100 imgsz=640
+```
+
+## Classes:
+- 0: drone
+
+Generated by Drone Detection System
+Extracted on: {time.strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        zip_file.writestr('README.md', readme_content)
+    
+    zip_data = zip_buffer.getvalue()
+    zip_buffer.close()
+    
+    print(f"✅ Training dataset ZIP created: {len(zip_data) / (1024*1024):.2f}MB")
+    print(f"📋 Files naming pattern: {safe_name}_XXXXXX.jpg/.txt")
+    return zip_data
 
 def process_image_in_memory(file_data, model):
     """Process image entirely in memory using ONNX or PyTorch model"""
@@ -664,7 +887,6 @@ def process_video_with_temp_files(input_path, output_path, model):
                         # PyTorch model
                         results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
                         processed_frame = results[0].plot()
-                        ai_processed += 1
                     
                     frame_to_write = processed_frame
                 except Exception as ai_error:
