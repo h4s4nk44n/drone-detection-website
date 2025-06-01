@@ -25,39 +25,13 @@ os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
 
-# Simple but effective CORS configuration
-CORS(app, 
-     origins=["*"],
-     methods=["GET", "POST", "OPTIONS"],
-     allow_headers=["*"],
-     expose_headers=["*"],
-     supports_credentials=False)
+# Simple CORS - let Flask-CORS handle everything
+CORS(app, origins=["*"])
 
 # Configure Flask for large files
-app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB max request size
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB
 app.config['DEBUG'] = False
 app.config['TESTING'] = False
-
-# Add back the important CORS handlers for large files
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = make_response()
-        response.headers.add("Access-Control-Allow-Origin", "*")
-        response.headers.add('Access-Control-Allow-Headers', "Content-Type,Authorization,Content-Length")
-        response.headers.add('Access-Control-Allow-Methods', "GET,POST,OPTIONS")
-        response.headers.add('Access-Control-Max-Age', '3600')
-        return response
-
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,Content-Length')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    response.headers.add('Access-Control-Max-Age', '3600')
-    # Important headers for large file handling
-    response.headers.add('Access-Control-Expose-Headers', 'Content-Length')
-    return response
 
 def is_youtube_url(url):
     """
@@ -91,9 +65,19 @@ model_path = os.path.join(os.path.dirname(__file__), 'models', 'best.pt')
 model = YOLO(model_path)
 print("✅ YOLO model loaded successfully")
 
+@app.before_request
+def log_request_info():
+    if request.method == 'POST':
+        content_length = request.headers.get('Content-Length')
+        print(f"📊 Incoming request size: {content_length} bytes")
+        if content_length and int(content_length) > 50 * 1024 * 1024:
+            print(f"🚨 Large request detected: {int(content_length) / (1024*1024):.1f}MB")
+
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     try:
+        print("🎯 Upload endpoint reached successfully")
+        
         if 'file' not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
         
