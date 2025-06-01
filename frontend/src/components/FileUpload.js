@@ -1,6 +1,5 @@
 // src/FileUpload.js
 import React, { useState, useEffect, useRef } from 'react';
-import './FileUpload.css';  // Import the CSS file
 
 const FileUpload = () => {
     const [file, setFile] = useState(null);
@@ -630,6 +629,26 @@ const FileUpload = () => {
             borderRadius: '50%',
             animation: 'spin 1s linear infinite'
         },
+        divider: {
+            textAlign: 'center',
+            margin: '2rem 0',
+            position: 'relative'
+        },
+        dividerLine: {
+            position: 'absolute',
+            top: '50%',
+            left: '0',
+            right: '0',
+            height: '1px',
+            backgroundColor: '#e2e8f0'
+        },
+        dividerText: {
+            backgroundColor: '#f8fafc',
+            padding: '0 1rem',
+            color: '#64748b',
+            fontWeight: '500',
+            fontSize: '0.875rem'
+        },
         youtubeSection: {
             margin: '20px 0',
             backgroundColor: '#ffffff',
@@ -825,8 +844,9 @@ const FileUpload = () => {
                 </div>
 
                 {/* OR Divider */}
-                <div className="divider">
-                    <span>OR</span>
+                <div style={styles.divider}>
+                    <div style={styles.dividerLine}></div>
+                    <span style={styles.dividerText}>OR</span>
                 </div>
 
                 {/* YouTube URL Section */}
