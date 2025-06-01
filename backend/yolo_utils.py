@@ -220,6 +220,9 @@ def process_file_in_memory(file_data, file_ext, filename, model):
     
     try:
         if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
+            # Define the output path that was missing
+            temp_output_path = os.path.splitext(temp_input_path)[0] + '_processed' + file_ext
+            
             # Simplified video processing for Cloud Run
             cap = cv2.VideoCapture(temp_input_path)
             
@@ -268,13 +271,13 @@ def process_file_in_memory(file_data, file_ext, filename, model):
             out.release()
             print("✅ Video processing completed")
             
-            # Read processed video
+            # Read the processed video and convert to base64
             with open(temp_output_path, 'rb') as f:
-                processed_data = f.read()
+                processed_video_data = f.read()
             
             # Convert to base64
             original_base64 = base64.b64encode(file_data).decode('utf-8')
-            processed_base64 = base64.b64encode(processed_data).decode('utf-8')
+            processed_base64 = base64.b64encode(processed_video_data).decode('utf-8')
             
             mime_type = "video/mp4"
             
