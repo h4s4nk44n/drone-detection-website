@@ -220,6 +220,7 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
     print(f"🔄 Processing file in memory: {filename}")
     if extract_training_data:
         print(f"🎯 Training data extraction enabled with confidence threshold: {confidence_threshold}")
+        print(f"🔧 Model will use conf=0.3 for detection, then filter by {confidence_threshold} for training data")
     
     # Training data extraction setup
     training_images = []
@@ -321,7 +322,7 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                                 # Resize frame
                                 frame_resized = cv2.resize(frame, (output_width, output_height))
                                 
-                                # Run YOLO on frame
+                                # Run AI on frame
                                 if hasattr(model, 'predict') and hasattr(model, 'draw_detections'):
                                     # ONNX model
                                     detections = model.predict(frame_resized)
@@ -351,15 +352,17 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                                                 extracted_count += 1
                                 else:
                                     # PyTorch model
-                                    results = model.predict(frame_resized, verbose=False)
+                                    results = model.predict(frame_resized, verbose=False, conf=0.3)
                                     processed_frame = results[0].plot()
                                     
                                     # Extract training data for PyTorch model if needed
                                     if extract_training_data:
                                         boxes = results[0].boxes
                                         if boxes is not None and len(boxes) > 0:
+                                            print(f"🔍 Frame {frame_count}: Found {len(boxes)} total detections")
                                             # Filter by confidence
                                             confident_boxes = boxes[boxes.conf >= confidence_threshold]
+                                            print(f"🔍 Frame {frame_count}: {len(confident_boxes)} detections above {confidence_threshold} threshold")
                                             if len(confident_boxes) > 0:
                                                 # Use original resolution frame for training data
                                                 original_frame = cv2.resize(frame, (width, height))
@@ -367,6 +370,8 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                                                 
                                                 # Take the most confident detection
                                                 best_box = confident_boxes[confident_boxes.conf.argmax()]
+                                                best_conf = float(best_box.conf.cpu().numpy())
+                                                print(f"🎯 Frame {frame_count}: Using detection with confidence {best_conf:.3f}")
                                                 
                                                 # Convert to YOLO format (normalized coordinates)
                                                 x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
@@ -459,11 +464,16 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
             print(f"   - Output size: {len(processed_video_data) / (1024*1024):.2f}MB")
             if extract_training_data:
                 print(f"   - Training samples extracted: {extracted_count}")
+                print(f"   - Frames processed: {processed_count}")
+                print(f"   - Extraction rate: {extracted_count/processed_count*100:.1f}% of processed frames" if processed_count > 0 else "   - No frames processed")
             
             # Return with or without training data
             if extract_training_data and extracted_count > 0:
                 zip_data = create_training_dataset_zip(training_images, training_labels, filename)
                 return original_base64, processed_base64, 'video/mp4', zip_data, extracted_count
+            elif extract_training_data and extracted_count == 0:
+                print(f"⚠️ No training data extracted - all detections were below confidence threshold {confidence_threshold}")
+                return original_base64, processed_base64, 'video/mp4'
             else:
                 return original_base64, processed_base64, 'video/mp4'
             
@@ -501,20 +511,24 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                             extracted_count += 1
             else:
                 # PyTorch model
-                results = model.predict(image, verbose=False)
+                results = model.predict(image, verbose=False, conf=0.3)
                 processed_image = results[0].plot()
                 
                 # Extract training data for PyTorch model if needed
                 if extract_training_data:
                     boxes = results[0].boxes
                     if boxes is not None and len(boxes) > 0:
+                        print(f"🔍 Image: Found {len(boxes)} total detections")
                         # Filter by confidence
                         confident_boxes = boxes[boxes.conf >= confidence_threshold]
+                        print(f"🔍 Image: {len(confident_boxes)} detections above {confidence_threshold} threshold")
                         if len(confident_boxes) > 0:
                             training_images.append(image.copy())
                             
                             # Take the most confident detection
                             best_box = confident_boxes[confident_boxes.conf.argmax()]
+                            best_conf = float(best_box.conf.cpu().numpy())
+                            print(f"🎯 Image: Using detection with confidence {best_conf:.3f}")
                             
                             # Convert to YOLO format
                             x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
@@ -543,11 +557,16 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
             print(f"✅ Image processing complete")
             if extract_training_data:
                 print(f"   - Training samples extracted: {extracted_count}")
+                if extracted_count == 0:
+                    print(f"⚠️ No training data extracted from image - all detections were below confidence threshold {confidence_threshold}")
             
             # Return with or without training data
             if extract_training_data and extracted_count > 0:
                 zip_data = create_training_dataset_zip(training_images, training_labels, filename)
                 return original_base64, processed_base64, 'image/jpeg', zip_data, extracted_count
+            elif extract_training_data and extracted_count == 0:
+                print(f"⚠️ No training data extracted from image - all detections were below confidence threshold {confidence_threshold}")
+                return original_base64, processed_base64, 'image/jpeg'
             else:
                 return original_base64, processed_base64, 'image/jpeg'
     
@@ -682,7 +701,7 @@ def process_image_in_memory(file_data, model):
     else:
         # PyTorch model (fallback)
         print("🤖 Using PyTorch model for inference...")
-        results = model.predict(image, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
+        results = model.predict(image, verbose=False)
         processed_image = results[0].plot()
     
     # Convert both images to base64
