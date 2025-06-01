@@ -113,7 +113,8 @@ def cleanup_old_files():
         # Increased cleanup time to 2 hours to prevent issues with large chunked downloads
         # Also check last_accessed time to keep recently used files
         last_access = file_info.get('last_accessed', file_info['created'])
-        if current_time - last_access > 7200:  # 2 hours since last access
+        # Increase time to 4 hours for better stability
+        if current_time - last_access > 14400:  # 4 hours since last access
             expired_files.append(file_id)
     
     for file_id in expired_files:
@@ -126,6 +127,22 @@ def cleanup_old_files():
             print(f"🧹 Cleaned up expired file: {file_id}")
         except:
             pass
+
+def ensure_file_ready(file_path, expected_size, timeout=30):
+    """Wait for file to be fully written before marking as ready"""
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            if os.path.exists(file_path):
+                actual_size = os.path.getsize(file_path)
+                if actual_size == expected_size:
+                    # File is the expected size, give it a moment to be fully flushed
+                    time.sleep(0.1)
+                    return True
+            time.sleep(0.2)  # Wait 200ms before checking again
+        except OSError:
+            time.sleep(0.2)
+    return False
 
 def is_youtube_url(url):
     """
@@ -246,17 +263,29 @@ def upload_file():
             original_size = len(base64.b64decode(original_base64))
             processed_size = len(base64.b64decode(processed_base64))
             
+            # Ensure files are fully written before proceeding
+            print(f"🔍 Verifying original file is ready: {original_temp_path}")
+            if not ensure_file_ready(original_temp_path, original_size):
+                raise Exception("Original file not ready after writing")
+                
+            print(f"🔍 Verifying processed file is ready: {processed_temp_path}")
+            if not ensure_file_ready(processed_temp_path, processed_size):
+                raise Exception("Processed file not ready after writing")
+            
+            print("✅ Both files verified and ready for chunked download")
+            
             original_chunks = (original_size + CHUNK_SIZE - 1) // CHUNK_SIZE
             processed_chunks = (processed_size + CHUNK_SIZE - 1) // CHUNK_SIZE
             
-            # Store file info
+            # Store file info - only after files are confirmed ready
             temp_files[original_file_id] = {
                 'path': original_temp_path,
                 'size': original_size,
                 'chunks': original_chunks,
                 'mime_type': mime_type,
                 'created': time.time(),
-                'last_accessed': time.time()
+                'last_accessed': time.time(),
+                'ready': True  # Mark as ready for download
             }
             
             temp_files[processed_file_id] = {
@@ -265,7 +294,8 @@ def upload_file():
                 'chunks': processed_chunks,
                 'mime_type': mime_type,
                 'created': time.time(),
-                'last_accessed': time.time()
+                'last_accessed': time.time(),
+                'ready': True  # Mark as ready for download
             }
             
             # Save metadata to disk for persistence
@@ -514,17 +544,29 @@ def process_uploaded():
         original_size = len(base64.b64decode(original_base64))
         processed_size = len(base64.b64decode(processed_base64))
         
+        # Ensure files are fully written before proceeding
+        print(f"🔍 Verifying original file is ready: {original_temp_path}")
+        if not ensure_file_ready(original_temp_path, original_size):
+            raise Exception("Original file not ready after writing")
+            
+        print(f"🔍 Verifying processed file is ready: {processed_temp_path}")
+        if not ensure_file_ready(processed_temp_path, processed_size):
+            raise Exception("Processed file not ready after writing")
+        
+        print("✅ Both files verified and ready for chunked download")
+        
         original_chunks = (original_size + CHUNK_SIZE - 1) // CHUNK_SIZE
         processed_chunks = (processed_size + CHUNK_SIZE - 1) // CHUNK_SIZE
         
-        # Store file info
+        # Store file info - only after files are confirmed ready
         temp_files[original_file_id] = {
             'path': original_temp_path,
             'size': original_size,
             'chunks': original_chunks,
             'mime_type': mime_type,
             'created': time.time(),
-            'last_accessed': time.time()
+            'last_accessed': time.time(),
+            'ready': True  # Mark as ready for download
         }
         
         temp_files[processed_file_id] = {
@@ -533,7 +575,8 @@ def process_uploaded():
             'chunks': processed_chunks,
             'mime_type': mime_type,
             'created': time.time(),
-            'last_accessed': time.time()
+            'last_accessed': time.time(),
+            'ready': True  # Mark as ready for download
         }
         
         # Save metadata to disk for persistence
@@ -599,6 +642,35 @@ def download_chunk(file_id, chunk_index):
         # Mark file as actively being downloaded
         active_downloads.add(file_id)
         
+        # First check if file exists in memory
+        if file_id not in temp_files:
+            # Try to reload from disk metadata in case of server restart
+            print(f"🔄 File not in memory, trying to reload from disk: {file_id}")
+            try:
+                temp_dir = tempfile.gettempdir()
+                metadata_path = os.path.join(temp_dir, f"{file_id}_metadata.json")
+                
+                if os.path.exists(metadata_path):
+                    with open(metadata_path, 'r') as f:
+                        file_info = json.load(f)
+                    
+                    # Check if the actual file still exists
+                    if os.path.exists(file_info['path']):
+                        temp_files[file_id] = file_info
+                        print(f"✅ Restored file from disk metadata: {file_id}")
+                    else:
+                        print(f"❌ File referenced in metadata doesn't exist: {file_info['path']}")
+                        # Clean up orphaned metadata
+                        os.unlink(metadata_path)
+                        raise FileNotFoundError("File no longer exists on disk")
+                else:
+                    print(f"❌ No metadata found for file: {file_id}")
+                    raise FileNotFoundError("No metadata found")
+                    
+            except Exception as reload_error:
+                print(f"❌ Could not reload file from disk: {reload_error}")
+                
+        # Check again after potential reload
         if file_id not in temp_files:
             print(f"❌ File not found in temp_files: {file_id}")
             print(f"📋 Available files: {list(temp_files.keys())}")
@@ -612,6 +684,27 @@ def download_chunk(file_id, chunk_index):
         
         file_info = temp_files[file_id]
         file_path = file_info['path']
+        
+        # Wait for file to be ready if it's not marked as ready yet
+        if not file_info.get('ready', False):
+            print(f"⏳ File not marked as ready, waiting: {file_id}")
+            # Wait up to 10 seconds for file to be ready
+            wait_time = 0
+            while not file_info.get('ready', False) and wait_time < 10:
+                time.sleep(0.5)
+                wait_time += 0.5
+                # Refresh file info in case it was updated
+                if file_id in temp_files:
+                    file_info = temp_files[file_id]
+                    
+            if not file_info.get('ready', False):
+                print(f"❌ File never became ready: {file_id}")
+                active_downloads.discard(file_id)
+                response = jsonify({"error": "File not ready for download"})
+                response.headers['Access-Control-Allow-Origin'] = '*'
+                response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+                response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+                return response, 503  # Service Unavailable
         
         # Update last accessed time to prevent cleanup
         temp_files[file_id]['last_accessed'] = time.time()

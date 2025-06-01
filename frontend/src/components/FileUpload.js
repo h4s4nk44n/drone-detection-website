@@ -102,6 +102,10 @@ const FileUpload = () => {
             console.log(`📋 File info:`, fileInfo);
             setMessage(`📥 Downloading ${fileType} result in ${fileInfo.chunks} chunks...`);
             
+            // Add a small delay to give server time to prepare files after processing
+            console.log(`⏳ Waiting 2 seconds for server to prepare files...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
             // Download all chunks with retry logic
             for (let i = 0; i < fileInfo.chunks; i++) {
                 setMessage(`📥 Downloading ${fileType} chunk ${i + 1}/${fileInfo.chunks}...`);
@@ -119,8 +123,9 @@ const FileUpload = () => {
                         if (retryCount > 0) {
                             console.log(`🔄 Retry ${retryCount}/${maxRetries} for chunk ${i + 1}`);
                             setMessage(`📥 Retrying ${fileType} chunk ${i + 1}/${fileInfo.chunks} (attempt ${retryCount + 1})...`);
-                            // Add delay before retry
-                            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+                            // Exponential backoff: wait longer for each retry
+                            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount - 1), 8000); // Max 8 seconds
+                            await new Promise(resolve => setTimeout(resolve, backoffDelay));
                         }
                         
                         const response = await fetch(chunkUrl, {
@@ -133,7 +138,6 @@ const FileUpload = () => {
                         });
                         
                         console.log(`📡 Chunk ${i + 1} response status:`, response.status);
-                        console.log(`📡 Chunk ${i + 1} response headers:`, [...response.headers.entries()]);
                         
                         if (!response.ok) {
                             // Try to get error details
@@ -141,12 +145,19 @@ const FileUpload = () => {
                             try {
                                 const errorData = await response.json();
                                 errorMessage = errorData.error || `HTTP ${response.status}`;
-                                console.error(`❌ Chunk ${i + 1} error data:`, errorData);
+                                // Only log error details on first attempt to reduce spam
+                                if (retryCount === 0) {
+                                    console.error(`❌ Chunk ${i + 1} error data:`, errorData);
+                                }
                             } catch (parseError) {
-                                console.error(`❌ Failed to parse chunk ${i + 1} error:`, parseError);
+                                if (retryCount === 0) {
+                                    console.error(`❌ Failed to parse chunk ${i + 1} error:`, parseError);
+                                }
                                 const errorText = await response.text();
                                 errorMessage = errorText || `HTTP ${response.status}`;
-                                console.error(`❌ Chunk ${i + 1} error text:`, errorText);
+                                if (retryCount === 0) {
+                                    console.error(`❌ Chunk ${i + 1} error text:`, errorText);
+                                }
                             }
                             throw new Error(`Failed to download chunk ${i + 1}: ${errorMessage}`);
                         }
@@ -182,7 +193,12 @@ const FileUpload = () => {
                         
                     } catch (fetchError) {
                         retryCount++;
-                        console.error(`❌ Network error for chunk ${i + 1} (attempt ${retryCount}):`, fetchError);
+                        // Only log detailed error info on first attempt to reduce spam
+                        if (retryCount === 1) {
+                            console.error(`❌ Network error for chunk ${i + 1} (attempt ${retryCount}):`, fetchError);
+                        } else {
+                            console.log(`🔄 Retry ${retryCount} failed for chunk ${i + 1}: ${fetchError.message}`);
+                        }
                         
                         if (retryCount >= maxRetries) {
                             // Check if it's a CORS error
@@ -193,14 +209,17 @@ const FileUpload = () => {
                             throw new Error(`Failed to download chunk ${i + 1} after ${maxRetries} attempts: ${fetchError.message}`);
                         }
                         
-                        // Log retry attempt
-                        console.log(`⏳ Will retry chunk ${i + 1} in ${retryCount} seconds...`);
+                        // Only log retry messages occasionally to reduce spam
+                        if (retryCount <= 2) {
+                            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount - 1), 8000);
+                            console.log(`⏳ Will retry chunk ${i + 1} in ${backoffDelay / 1000} seconds...`);
+                        }
                     }
                 }
                 
-                // Add small delay between chunks to avoid overwhelming the server
+                // Add longer delay between chunks to avoid overwhelming the server
                 if (i < fileInfo.chunks - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await new Promise(resolve => setTimeout(resolve, 300)); // Increased from 100ms to 300ms
                 }
             }
             
