@@ -18,6 +18,7 @@ import gc
 import shutil
 import uuid
 import time
+import json
 
 # Load environment variables
 load_dotenv()
@@ -45,6 +46,59 @@ temp_files = {}
 # Track files currently being downloaded to prevent cleanup
 active_downloads = set()
 
+def load_temp_files_from_disk():
+    """Load temp file tracking from disk on startup"""
+    temp_dir = tempfile.gettempdir()
+    print(f"🔄 Loading temp files from disk: {temp_dir}")
+    
+    for filename in os.listdir(temp_dir):
+        if filename.endswith('_metadata.json'):
+            try:
+                file_id = filename.replace('_metadata.json', '')
+                metadata_path = os.path.join(temp_dir, filename)
+                
+                with open(metadata_path, 'r') as f:
+                    file_info = json.load(f)
+                
+                # Check if the actual file still exists
+                if os.path.exists(file_info['path']):
+                    temp_files[file_id] = file_info
+                    print(f"📋 Restored file tracking: {file_id}")
+                else:
+                    # Clean up orphaned metadata
+                    os.unlink(metadata_path)
+                    print(f"🧹 Removed orphaned metadata: {file_id}")
+                    
+            except Exception as e:
+                print(f"⚠️ Failed to load metadata {filename}: {e}")
+
+def save_temp_file_metadata(file_id, file_info):
+    """Save temp file metadata to disk"""
+    try:
+        temp_dir = tempfile.gettempdir()
+        metadata_path = os.path.join(temp_dir, f"{file_id}_metadata.json")
+        
+        with open(metadata_path, 'w') as f:
+            json.dump(file_info, f)
+        
+        print(f"💾 Saved metadata for: {file_id}")
+        
+    except Exception as e:
+        print(f"⚠️ Failed to save metadata for {file_id}: {e}")
+
+def remove_temp_file_metadata(file_id):
+    """Remove temp file metadata from disk"""
+    try:
+        temp_dir = tempfile.gettempdir()
+        metadata_path = os.path.join(temp_dir, f"{file_id}_metadata.json")
+        
+        if os.path.exists(metadata_path):
+            os.unlink(metadata_path)
+            print(f"🧹 Removed metadata for: {file_id}")
+            
+    except Exception as e:
+        print(f"⚠️ Failed to remove metadata for {file_id}: {e}")
+
 def cleanup_old_files():
     """Clean up files older than 2 hours (increased from 1 hour for chunked downloads)"""
     current_time = time.time()
@@ -68,6 +122,7 @@ def cleanup_old_files():
             if os.path.exists(file_info['path']):
                 os.unlink(file_info['path'])
             del temp_files[file_id]
+            remove_temp_file_metadata(file_id)
             print(f"🧹 Cleaned up expired file: {file_id}")
         except:
             pass
@@ -103,6 +158,9 @@ print("🤖 Loading YOLO model...")
 model_path = os.path.join(os.path.dirname(__file__), 'models', 'best.pt')
 model = YOLO(model_path)
 print("✅ YOLO model loaded successfully")
+
+# Load existing temp files from disk (for container restarts)
+load_temp_files_from_disk()
 
 @app.before_request
 def log_request_info():
@@ -209,6 +267,10 @@ def upload_file():
                 'created': time.time(),
                 'last_accessed': time.time()
             }
+            
+            # Save metadata to disk for persistence
+            save_temp_file_metadata(original_file_id, temp_files[original_file_id])
+            save_temp_file_metadata(processed_file_id, temp_files[processed_file_id])
             
             print(f"📊 Created chunked downloads:")
             print(f"   - Original: {original_chunks} chunks ({original_size / (1024*1024):.2f}MB)")
@@ -474,6 +536,10 @@ def process_uploaded():
             'last_accessed': time.time()
         }
         
+        # Save metadata to disk for persistence
+        save_temp_file_metadata(original_file_id, temp_files[original_file_id])
+        save_temp_file_metadata(processed_file_id, temp_files[processed_file_id])
+        
         print(f"📊 Created chunked downloads:")
         print(f"   - Original: {original_chunks} chunks ({original_size / (1024*1024):.2f}MB)")
         print(f"   - Processed: {processed_chunks} chunks ({processed_size / (1024*1024):.2f}MB)")
@@ -701,6 +767,7 @@ def cleanup_download(file_id):
                 os.unlink(file_info['path'])
                 print(f"🧹 Deleted file: {file_info['path']}")
             del temp_files[file_id]
+            remove_temp_file_metadata(file_id)
             print(f"🧹 Manual cleanup of download file: {file_id}")
             
             response = jsonify({"message": "File cleaned up successfully"})
