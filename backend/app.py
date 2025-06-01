@@ -26,7 +26,7 @@ os.environ['OMP_NUM_THREADS'] = '1'
 
 app = Flask(__name__)
 
-# Simple CORS - works everywhere
+# Simple CORS - keep it basic
 CORS(app)
 
 # Configure Flask for large files
@@ -191,49 +191,167 @@ def upload_chunk():
         
     except Exception as e:
         print(f"❌ Chunk upload error: {str(e)}")
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/process-uploaded', methods=['POST'])
 def process_uploaded():
+    upload_id = None
+    temp_dir = None
+    
     try:
-        data = request.get_json()
-        upload_id = data['uploadId']
-        file_name = data['fileName']
+        print("🔄 Starting chunked file processing...")
         
-        # Reconstruct file from chunks
+        # Parse request data with better error handling
+        try:
+            data = request.get_json()
+            if not data:
+                print("❌ No JSON data received")
+                return jsonify({"error": "No JSON data received"}), 400
+                
+            upload_id = data.get('uploadId')
+            file_name = data.get('fileName')
+            
+            if not upload_id or not file_name:
+                print(f"❌ Missing required fields: uploadId={upload_id}, fileName={file_name}")
+                return jsonify({"error": "Missing uploadId or fileName"}), 400
+                
+        except Exception as parse_error:
+            print(f"❌ Error parsing request: {str(parse_error)}")
+            return jsonify({"error": f"Invalid request format: {str(parse_error)}"}), 400
+        
+        print(f"📋 Processing upload ID: {upload_id}")
+        print(f"📁 File name: {file_name}")
+        
+        # Check temp directory
         temp_dir = os.path.join(tempfile.gettempdir(), f"upload_{upload_id}")
         
-        # Combine chunks
+        if not os.path.exists(temp_dir):
+            print(f"❌ Temp directory not found: {temp_dir}")
+            return jsonify({"error": "Upload chunks not found. Please re-upload the file."}), 400
+        
+        print(f"📂 Found temp directory: {temp_dir}")
+        
+        # List all files in temp directory for debugging
+        try:
+            files_in_dir = os.listdir(temp_dir)
+            print(f"📋 Files in temp dir: {files_in_dir}")
+        except Exception as list_error:
+            print(f"❌ Error listing temp directory: {str(list_error)}")
+            return jsonify({"error": "Cannot access upload chunks"}), 500
+        
+        # Reconstruct file from chunks
         combined_data = bytearray()
         chunk_index = 0
+        chunks_found = 0
+        
         while True:
             chunk_path = os.path.join(temp_dir, f"chunk_{chunk_index}")
             if not os.path.exists(chunk_path):
+                print(f"📋 No more chunks found at index {chunk_index}")
                 break
-            with open(chunk_path, 'rb') as f:
-                combined_data.extend(f.read())
+            try:
+                with open(chunk_path, 'rb') as f:
+                    chunk_data = f.read()
+                    combined_data.extend(chunk_data)
+                    chunks_found += 1
+                    print(f"📦 Loaded chunk {chunk_index}: {len(chunk_data)} bytes")
+            except Exception as chunk_error:
+                print(f"❌ Error reading chunk {chunk_index}: {str(chunk_error)}")
+                return jsonify({"error": f"Error reading chunk {chunk_index}: {str(chunk_error)}"}), 500
             chunk_index += 1
         
-        print(f"📋 Reconstructed file: {len(combined_data)} bytes")
+        total_size_mb = len(combined_data) / (1024 * 1024)
+        print(f"📋 Reconstructed file: {len(combined_data)} bytes ({total_size_mb:.2f}MB) from {chunks_found} chunks")
         
-        # Process with YOLO
+        if len(combined_data) == 0:
+            print("❌ No data found in uploaded chunks")
+            return jsonify({"error": "No data found in uploaded chunks"}), 400
+        
+        if chunks_found == 0:
+            print("❌ No chunks found")
+            return jsonify({"error": "No chunks found for processing"}), 400
+        
+        # Check if file is too large for processing
+        if total_size_mb > 50:  # Conservative limit
+            print(f"⚠️ Very large file detected ({total_size_mb:.2f}MB)")
+            return jsonify({
+                "error": "File too large for processing. Please try with a video under 50MB.",
+                "file_size_mb": round(total_size_mb, 2)
+            }), 413
+        
+        # Get file extension for processing
         file_ext = os.path.splitext(file_name)[1].lower()
-        original_base64, processed_base64, mime_type = process_file_in_memory(
-            bytes(combined_data), file_ext, file_name, model
-        )
+        print(f"🔧 File extension: {file_ext}")
         
-        # Cleanup temp files
-        shutil.rmtree(temp_dir)
+        if file_ext not in ['.mp4', '.avi', '.mov', '.webm']:
+            print(f"❌ Unsupported file type for chunked upload: {file_ext}")
+            return jsonify({"error": f"Unsupported file type: {file_ext}"}), 400
         
-        return jsonify({
+        # Process with YOLO - with enhanced error handling
+        print(f"🤖 Processing {file_ext} file with YOLO...")
+        
+        try:
+            original_base64, processed_base64, mime_type = process_file_in_memory(
+                bytes(combined_data), file_ext, file_name, model
+            )
+            print("✅ YOLO processing completed successfully")
+            
+        except Exception as processing_error:
+            print(f"❌ YOLO processing failed: {str(processing_error)}")
+            traceback.print_exc()
+            
+            # Cleanup temp files before returning error
+            try:
+                if temp_dir and os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+                    print("🧹 Cleaned up temp files after processing error")
+            except:
+                pass
+            
+            return jsonify({
+                "error": f"Video processing failed: {str(processing_error)}",
+                "suggestion": "This may be due to file format or size issues. Try with a smaller MP4 file."
+            }), 500
+        
+        # Prepare response with size check
+        response_data = {
             "message": "Large file processed successfully",
             "original": f"data:{mime_type};base64,{original_base64}",
-            "processed": f"data:{mime_type};base64,{processed_base64}"
-        })
+            "processed": f"data:{mime_type};base64,{processed_base64}",
+            "file_size_mb": round(total_size_mb, 2)
+        }
+        
+        # Check response size
+        response_size_mb = len(str(response_data)) / (1024 * 1024)
+        print(f"📊 Response size: {response_size_mb:.2f}MB")
+        
+        # Cleanup temp files
+        try:
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                print(f"🧹 Cleaned up temp directory: {temp_dir}")
+        except Exception as cleanup_error:
+            print(f"⚠️ Cleanup warning: {str(cleanup_error)}")
+        
+        print("✅ Chunked upload processing complete")
+        return jsonify(response_data)
         
     except Exception as e:
-        print(f"❌ Process uploaded error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        print(f"❌ Unexpected error in process_uploaded: {str(e)}")
+        traceback.print_exc()
+        
+        # Emergency cleanup
+        try:
+            if upload_id:
+                emergency_temp_dir = os.path.join(tempfile.gettempdir(), f"upload_{upload_id}")
+                if os.path.exists(emergency_temp_dir):
+                    shutil.rmtree(emergency_temp_dir)
+                    print("🧹 Emergency cleanup completed")
+        except:
+            pass
+        
+        return jsonify({"error": f"Processing failed: {str(e)}"}), 500
 
 if __name__ == '__main__':
     # Get port from environment (Google Cloud Run sets PORT automatically)
@@ -248,6 +366,7 @@ if __name__ == '__main__':
     print(f"📏 Max file size: {100 * 1024 * 1024 / (1024*1024):.0f}MB")
     print("💾 Processing files in memory only - no disk storage!")
     print("🔗 YouTube video processing enabled!")
+    print("📦 Chunked upload support enabled!")
     
     app.run(
         host=host,
