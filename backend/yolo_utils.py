@@ -278,6 +278,7 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
             # Try OpenCV approach first, fallback to FFmpeg
             processed_successfully = False
             opencv_error = None
+            processed_count = 0  # Initialize to avoid scope issues
             
             try:
                 print("🔄 Attempting OpenCV video processing...")
@@ -299,7 +300,7 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                 # Process video with OpenCV
                 cap = cv2.VideoCapture(temp_input_path)
                 frame_count = 0
-                processed_count = 0
+                processed_count = 0  # Ensure it's in this scope
                 chunk_size = 30  # Process in chunks of 30 frames
                 
                 try:
@@ -464,15 +465,24 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
             print(f"   - Output size: {len(processed_video_data) / (1024*1024):.2f}MB")
             if extract_training_data:
                 print(f"   - Training samples extracted: {extracted_count}")
-                print(f"   - Frames processed: {processed_count}")
-                print(f"   - Extraction rate: {extracted_count/processed_count*100:.1f}% of processed frames" if processed_count > 0 else "   - No frames processed")
+                # Show frame statistics if available
+                if processed_count > 0:
+                    print(f"   - Frames processed: {processed_count}")
+                    print(f"   - Extraction rate: {extracted_count/processed_count*100:.1f}% of processed frames")
+                elif opencv_error is not None:
+                    print(f"   - Note: Frame statistics not available with FFmpeg fallback")
+                else:
+                    print(f"   - Note: No frames were processed")
             
             # Return with or without training data
             if extract_training_data and extracted_count > 0:
                 zip_data = create_training_dataset_zip(training_images, training_labels, filename)
                 return original_base64, processed_base64, 'video/mp4', zip_data, extracted_count
             elif extract_training_data and extracted_count == 0:
-                print(f"⚠️ No training data extracted - all detections were below confidence threshold {confidence_threshold}")
+                if opencv_error is not None:
+                    print(f"⚠️ No training data extracted - FFmpeg fallback doesn't support training data extraction")
+                else:
+                    print(f"⚠️ No training data extracted - all detections were below confidence threshold {confidence_threshold}")
                 return original_base64, processed_base64, 'video/mp4'
             else:
                 return original_base64, processed_base64, 'video/mp4'
