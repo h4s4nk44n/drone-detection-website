@@ -20,6 +20,7 @@ import uuid
 import time
 import json
 import zipfile
+import yaml
 
 # Load environment variables
 load_dotenv()
