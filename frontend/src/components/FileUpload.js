@@ -20,6 +20,21 @@ const FileUpload = () => {
     const [trainingDataResults, setTrainingDataResults] = useState([]);
     const [bulkTrainingData, setBulkTrainingData] = useState(null);
 
+    // Camera functionality state
+    const [showCamera, setShowCamera] = useState(false);
+    const [cameraStream, setCameraStream] = useState(null);
+    const [isRecording, setIsRecording] = useState(false);
+    const [mediaRecorder, setMediaRecorder] = useState(null);
+    const [recordedChunks, setRecordedChunks] = useState([]);
+    const [cameraError, setCameraError] = useState('');
+    const [recordingTime, setRecordingTime] = useState(0);
+    const [recordingTimer, setRecordingTimer] = useState(null);
+    const cameraVideoRef = useRef(null);
+    const canvasRef = useRef(null);
+
+    // Constants
+    const MAX_RECORDING_TIME = 120; // 120 seconds = 2 minutes
+
     // Test server connection on component mount
     useEffect(() => {
         const testServer = async () => {
@@ -55,6 +70,18 @@ const FileUpload = () => {
         const interval = setInterval(testServer, 30000);
         return () => clearInterval(interval);
     }, []);
+
+    // Cleanup camera on component unmount
+    useEffect(() => {
+        return () => {
+            if (cameraStream) {
+                cameraStream.getTracks().forEach(track => track.stop());
+            }
+            if (recordingTimer) {
+                clearInterval(recordingTimer);
+            }
+        };
+    }, [cameraStream, recordingTimer]);
 
     const handleDrag = (e) => {
         e.preventDefault();
@@ -561,9 +588,193 @@ const FileUpload = () => {
         setBulkTrainingData(null);
         setMessage('');
         setError('');
+        stopCamera(); // Stop camera when clearing all
         if (fileInputRef.current) {
             fileInputRef.current.value = '';
         }
+    };
+
+    // Camera functionality
+    const startCamera = async () => {
+        try {
+            setCameraError('');
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { 
+                    width: { ideal: 1280, max: 1280 },
+                    height: { ideal: 720, max: 720 },
+                    facingMode: 'environment', // Use back camera on mobile
+                    frameRate: { ideal: 30, max: 30 }
+                }, 
+                audio: true 
+            });
+            
+            setCameraStream(stream);
+            if (cameraVideoRef.current) {
+                cameraVideoRef.current.srcObject = stream;
+            }
+            setShowCamera(true);
+            console.log('✅ Camera started successfully (max 720p)');
+        } catch (error) {
+            console.error('❌ Camera access error:', error);
+            setCameraError(`Camera access failed: ${error.message}`);
+        }
+    };
+
+    const stopCamera = () => {
+        if (cameraStream) {
+            cameraStream.getTracks().forEach(track => track.stop());
+            setCameraStream(null);
+        }
+        if (mediaRecorder && isRecording) {
+            mediaRecorder.stop();
+        }
+        if (recordingTimer) {
+            clearInterval(recordingTimer);
+            setRecordingTimer(null);
+        }
+        setShowCamera(false);
+        setIsRecording(false);
+        setRecordingTime(0);
+        setCameraError('');
+        console.log('📷 Camera stopped');
+    };
+
+    const takePhoto = () => {
+        if (!cameraVideoRef.current || !canvasRef.current) {
+            alert('Camera not ready');
+            return;
+        }
+
+        const video = cameraVideoRef.current;
+        const canvas = canvasRef.current;
+        const context = canvas.getContext('2d');
+
+        // Set canvas dimensions to match video
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        // Draw current video frame to canvas
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        // Convert canvas to blob
+        canvas.toBlob((blob) => {
+            if (blob) {
+                // Create a file from the blob
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const photoFile = new File([blob], `camera-photo-${timestamp}.jpg`, { 
+                    type: 'image/jpeg' 
+                });
+
+                // Add to files list
+                setFiles(prevFiles => [...prevFiles, photoFile]);
+                console.log(`📸 Photo captured: ${photoFile.name} (${(photoFile.size / (1024*1024)).toFixed(2)}MB)`);
+                
+                // Close camera after taking photo
+                stopCamera();
+            }
+        }, 'image/jpeg', 0.9);
+    };
+
+    const startRecording = () => {
+        if (!cameraStream) {
+            alert('Camera not available');
+            return;
+        }
+
+        try {
+            // Try different WebM codecs for better compression
+            let mimeType = 'video/webm;codecs=vp9';
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+                mimeType = 'video/webm;codecs=vp8';
+                if (!MediaRecorder.isTypeSupported(mimeType)) {
+                    mimeType = 'video/webm';
+                }
+            }
+
+            const recorder = new MediaRecorder(cameraStream, {
+                mimeType: mimeType,
+                videoBitsPerSecond: 1000000 // 1Mbps - good quality but smaller files
+            });
+
+            const chunks = [];
+            
+            recorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    chunks.push(event.data);
+                }
+            };
+
+            recorder.onstop = () => {
+                const blob = new Blob(chunks, { type: mimeType });
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                const videoFile = new File([blob], `camera-video-${timestamp}.webm`, { 
+                    type: 'video/webm' 
+                });
+
+                // Add to files list
+                setFiles(prevFiles => [...prevFiles, videoFile]);
+                const fileSizeMB = (videoFile.size / (1024*1024)).toFixed(2);
+                console.log(`🎥 Video recorded: ${videoFile.name} (${fileSizeMB}MB) - Duration: ${recordingTime}s`);
+                
+                setRecordedChunks([]);
+                setIsRecording(false);
+                setRecordingTime(0);
+                
+                // Clear timer
+                if (recordingTimer) {
+                    clearInterval(recordingTimer);
+                    setRecordingTimer(null);
+                }
+            };
+
+            recorder.start();
+            setMediaRecorder(recorder);
+            setIsRecording(true);
+            setRecordingTime(0);
+            
+            // Start timer
+            const timer = setInterval(() => {
+                setRecordingTime(prevTime => {
+                    const newTime = prevTime + 1;
+                    
+                    // Auto-stop at max recording time
+                    if (newTime >= MAX_RECORDING_TIME) {
+                        recorder.stop();
+                        clearInterval(timer);
+                        setRecordingTimer(null);
+                        console.log(`🛑 Recording auto-stopped at ${MAX_RECORDING_TIME} seconds`);
+                        return MAX_RECORDING_TIME;
+                    }
+                    
+                    return newTime;
+                });
+            }, 1000);
+            
+            setRecordingTimer(timer);
+            console.log(`🎥 Recording started (max ${MAX_RECORDING_TIME}s, ${mimeType})`);
+            
+        } catch (error) {
+            console.error('❌ Recording error:', error);
+            alert(`Recording failed: ${error.message}`);
+        }
+    };
+
+    const stopRecording = () => {
+        if (mediaRecorder && isRecording) {
+            mediaRecorder.stop();
+            if (recordingTimer) {
+                clearInterval(recordingTimer);
+                setRecordingTimer(null);
+            }
+            console.log(`🛑 Recording stopped manually at ${recordingTime}s`);
+        }
+    };
+
+    // Format recording time as MM:SS
+    const formatRecordingTime = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
     };
 
     // Styles object
@@ -900,6 +1111,100 @@ const FileUpload = () => {
             fontSize: '0.875rem',
             fontWeight: '500',
             marginBottom: '0.5rem'
+        },
+        // Camera styles
+        cameraSection: {
+            backgroundColor: '#f0f9ff',
+            borderRadius: '12px',
+            padding: '2rem',
+            margin: '2rem 0',
+            border: '2px solid #0ea5e9'
+        },
+        cameraHeader: {
+            fontSize: '1.5rem',
+            fontWeight: '700',
+            color: '#0c4a6e',
+            marginBottom: '1rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem'
+        },
+        cameraControls: {
+            display: 'flex',
+            gap: '1rem',
+            marginBottom: '1.5rem',
+            flexWrap: 'wrap'
+        },
+        cameraButton: {
+            backgroundColor: '#0ea5e9',
+            color: '#ffffff',
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            padding: '0.75rem 1.5rem',
+            borderRadius: '8px',
+            border: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease',
+            flex: 1,
+            minWidth: '120px'
+        },
+        recordButton: {
+            backgroundColor: '#dc2626',
+            color: '#ffffff',
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            padding: '0.75rem 1.5rem',
+            borderRadius: '8px',
+            border: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease',
+            flex: 1,
+            minWidth: '120px'
+        },
+        cameraContainer: {
+            position: 'relative',
+            backgroundColor: '#000000',
+            borderRadius: '12px',
+            overflow: 'hidden',
+            marginBottom: '1rem',
+            aspectRatio: '16/9'
+        },
+        cameraVideo: {
+            width: '100%',
+            height: '100%',
+            objectFit: 'cover'
+        },
+        cameraOverlay: {
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            color: '#ffffff',
+            fontSize: '1.125rem',
+            fontWeight: '600'
+        },
+        recordingIndicator: {
+            position: 'absolute',
+            top: '1rem',
+            right: '1rem',
+            backgroundColor: '#dc2626',
+            color: '#ffffff',
+            padding: '0.5rem 1rem',
+            borderRadius: '20px',
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            animation: 'pulse 2s infinite'
+        },
+        hiddenCanvas: {
+            display: 'none'
         }
     };
 
@@ -964,6 +1269,30 @@ const FileUpload = () => {
                     .toggle-button:hover {
                         background-color: #4f46e5;
                         transform: translateY(-1px);
+                    }
+                    
+                    .camera-button:hover:not(:disabled) {
+                        background-color: #0284c7;
+                        transform: translateY(-1px);
+                        box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3);
+                    }
+                    
+                    .record-button:hover:not(:disabled) {
+                        background-color: #b91c1c;
+                        transform: translateY(-1px);
+                        box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3);
+                    }
+                    
+                    .camera-button:disabled, .record-button:disabled {
+                        opacity: 0.6;
+                        cursor: not-allowed;
+                        transform: none;
+                        box-shadow: none;
+                    }
+                    
+                    @keyframes pulse {
+                        0%, 100% { opacity: 1; }
+                        50% { opacity: 0.5; }
                     }
                     
                     input[type="range"] {
@@ -1119,6 +1448,110 @@ const FileUpload = () => {
                             </div>
                         )}
                     </div>
+                </div>
+
+                {/* Camera Section */}
+                <div style={styles.cameraSection}>
+                    <h3 style={styles.cameraHeader}>
+                        📷 Camera Capture
+                    </h3>
+                    
+                    <p style={{...styles.trainingDescription, color: '#0c4a6e', marginBottom: '1.5rem'}}>
+                        Take photos or record videos directly from your device camera for instant drone detection analysis.
+                        Videos limited to 720p resolution and 2 minutes maximum duration for optimal processing.
+                    </p>
+                    
+                    {!showCamera ? (
+                        <div style={styles.cameraControls}>
+                            <button 
+                                onClick={startCamera}
+                                style={styles.cameraButton}
+                                className="camera-button"
+                                disabled={loading}
+                            >
+                                📷 Start Camera
+                            </button>
+                        </div>
+                    ) : (
+                        <>
+                            <div style={styles.cameraContainer}>
+                                <video
+                                    ref={cameraVideoRef}
+                                    autoPlay
+                                    playsInline
+                                    muted
+                                    style={styles.cameraVideo}
+                                />
+                                {isRecording && (
+                                    <div style={{
+                                        ...styles.recordingIndicator,
+                                        backgroundColor: recordingTime > 100 ? '#dc2626' : recordingTime > 90 ? '#f59e0b' : '#dc2626'
+                                    }}>
+                                        ● REC {formatRecordingTime(recordingTime)} / {formatRecordingTime(MAX_RECORDING_TIME)}
+                                    </div>
+                                )}
+                                {!cameraStream && (
+                                    <div style={styles.cameraOverlay}>
+                                        Starting camera...
+                                    </div>
+                                )}
+                            </div>
+                            
+                            <div style={styles.cameraControls}>
+                                <button 
+                                    onClick={takePhoto}
+                                    style={styles.cameraButton}
+                                    className="camera-button"
+                                    disabled={!cameraStream || isRecording}
+                                >
+                                    📸 Take Photo
+                                </button>
+                                
+                                {!isRecording ? (
+                                    <button 
+                                        onClick={startRecording}
+                                        style={styles.recordButton}
+                                        className="record-button"
+                                        disabled={!cameraStream}
+                                    >
+                                        🎥 Start Recording
+                                    </button>
+                                ) : (
+                                    <button 
+                                        onClick={stopRecording}
+                                        style={{...styles.recordButton, backgroundColor: '#059669'}}
+                                        className="record-button"
+                                    >
+                                        🛑 Stop Recording
+                                    </button>
+                                )}
+                                
+                                <button 
+                                    onClick={stopCamera}
+                                    style={{...styles.cameraButton, backgroundColor: '#6b7280'}}
+                                    className="camera-button"
+                                >
+                                    ❌ Close Camera
+                                </button>
+                            </div>
+                        </>
+                    )}
+                    
+                    {cameraError && (
+                        <div style={{
+                            backgroundColor: '#fee2e2',
+                            color: '#dc2626',
+                            padding: '1rem',
+                            borderRadius: '8px',
+                            marginTop: '1rem',
+                            fontSize: '0.875rem'
+                        }}>
+                            {cameraError}
+                        </div>
+                    )}
+                    
+                    {/* Hidden canvas for photo capture */}
+                    <canvas ref={canvasRef} style={styles.hiddenCanvas} />
                 </div>
 
                 {/* Training Data Extraction Section */}
