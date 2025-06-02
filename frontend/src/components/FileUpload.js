@@ -31,6 +31,7 @@ const FileUpload = () => {
     const [recordingTimer, setRecordingTimer] = useState(null);
     const cameraVideoRef = useRef(null);
     const canvasRef = useRef(null);
+    const [isCameraViewfinderReady, setIsCameraViewfinderReady] = useState(false);
 
     // Constants
     const MAX_RECORDING_TIME = 120; // 120 seconds = 2 minutes
@@ -73,15 +74,152 @@ const FileUpload = () => {
 
     // Cleanup camera on component unmount
     useEffect(() => {
+        // This effect now runs when cameraStream changes, or on component unmount.
+        // It ensures that if a cameraStream was active, its tracks are stopped.
+        const currentStreamToClean = cameraStream; // Capture the stream instance at this effect's setup time.
+
         return () => {
-            if (cameraStream) {
-                cameraStream.getTracks().forEach(track => track.stop());
-            }
-            if (recordingTimer) {
-                clearInterval(recordingTimer);
+            if (currentStreamToClean) {
+                console.log('🧹 useEffect[cameraStream] cleanup: Stopping tracks for stream instance:', currentStreamToClean.id);
+                let tracksStopped = false;
+                currentStreamToClean.getTracks().forEach(track => {
+                    if (track.readyState === 'live') {
+                        track.stop();
+                        tracksStopped = true;
+                    }
+                });
+                if (tracksStopped) {
+                    console.log('Tracks stopped for', currentStreamToClean.id);
+                } else {
+                    console.log('No live tracks to stop for', currentStreamToClean.id, 'or already stopped.');
+                }
             }
         };
-    }, [cameraStream, recordingTimer]);
+    }, [cameraStream]); // Now ONLY depends on cameraStream
+
+    // Separate effect specifically for cleaning up the recordingTimer on component unmount as a safety net.
+    // stopCamera and stopRecording should handle clearing it during active use.
+    useEffect(() => {
+        const timerIdToClearOnUnmount = recordingTimer; // Capture the timer ID at effect setup
+        return () => {
+            if (timerIdToClearOnUnmount) {
+                console.log('🧹 useEffect[] unmount (safety net): Clearing recordingTimer ID:', timerIdToClearOnUnmount);
+                clearInterval(timerIdToClearOnUnmount);
+            }
+        };
+    }, []); // Empty dependency array: runs only on mount and unmount (cleanup on unmount)
+
+    // Effect to setup video element when cameraStream is ready and showCamera is true
+    useEffect(() => {
+        if (showCamera && cameraStream && cameraVideoRef.current) {
+            const video = cameraVideoRef.current;
+            console.log('📹 useEffect [ caméra ] activé: Tentative de configuration de l\'élément vidéo.'); // French: useEffect [camera] active: Attempting to configure video element
+            
+            video.muted = true; // Ensure muted for autoplay
+            console.log('📹 useEffect [ caméra ]: Vidéo mise en sourdine.', video.muted);
+            
+            console.log('📹 useEffect [ caméra ]: Assignation de cameraStream à srcObject...', cameraStream);
+            video.srcObject = cameraStream;
+            console.log('📹 useEffect [ caméra ]: srcObject assigné. Valeur actuelle:', video.srcObject);
+            
+            setIsCameraViewfinderReady(false); // Reset before attempting to load
+
+            let resolved = false;
+            const timeoutDuration = 15000; // 15 seconds timeout for video events
+
+            const cleanupEventListeners = () => {
+                console.log('🧹 useEffect [ caméra ]: Nettoyage des écouteurs d\'événements vidéo.'); // French: Cleaning up video event listeners
+                video.removeEventListener('loadedmetadata', onLoadedMetadata);
+                video.removeEventListener('canplay', onCanPlay);
+                video.removeEventListener('playing', onPlaying);
+                video.removeEventListener('stalled', onStalled);
+                video.removeEventListener('error', onError);
+            };
+
+            const succeed = (eventName) => {
+                if (resolved) return;
+                resolved = true;
+                cleanupEventListeners();
+                console.log(`✅ Événement vidéo dans useEffect [ caméra ]: ${eventName}. Viseur prêt.`); // French: Video event in useEffect [camera]: Viewfinder ready
+                setIsCameraViewfinderReady(true);
+            };
+
+            const fail = (errorMsg, errorObj) => {
+                if (resolved) return;
+                resolved = true;
+                cleanupEventListeners();
+                console.error(`❌ ${errorMsg} dans useEffect [ caméra ]`, errorObj || ''); // French: in useEffect [camera]
+                setCameraError(`Erreur flux caméra: ${errorMsg.split('.')[0]}. Réessayez de démarrer la caméra.`); // French: Camera stream error: Try restarting camera
+                setIsCameraViewfinderReady(false);
+            };
+
+            const onLoadedMetadata = () => {
+                console.log('📹 Événement [ caméra ]: loadedmetadata. Dimensions vidéo:', video.videoWidth, 'x', video.videoHeight); // French: Event [camera]: Video dimensions
+                // For debugging, let's try setting ready here, but ideally we wait for canplay/playing
+                // succeed('loadedmetadata (debug ready)'); 
+            };
+            const onCanPlay = () => {
+                console.log('📹 Événement [ caméra ]: canplay');
+                succeed('canplay');
+            };
+            const onPlaying = () => {
+                console.log('📹 Événement [ caméra ]: playing');
+                succeed('playing');
+            };
+            const onStalled = () => console.warn('📹 Événement [ caméra ]: stalled (Problème réseau?)'); // French: Network issue?
+            const onError = (event) => {
+                console.error('📹 Événement [ caméra ]: error object:', event);
+                let errorDetail = 'unknown error';
+                if (event && event.target && event.target.error) {
+                    const vidError = event.target.error;
+                    errorDetail = `code ${vidError.code}, ${vidError.message}`;
+                }
+                fail(`Erreur élément vidéo flux (${errorDetail})`, event); // French: Video element stream error
+            };
+
+            video.addEventListener('loadedmetadata', onLoadedMetadata);
+            video.addEventListener('canplay', onCanPlay);
+            video.addEventListener('playing', onPlaying);
+            video.addEventListener('stalled', onStalled);
+            video.addEventListener('error', onError);
+            
+            console.log('📹 useEffect [ caméra ]: Tentative de video.play()'); // French: Attempting video.play()
+            video.play().then(() => {
+                console.log('✅ video.play() promesse résolue dans useEffect [ caméra ].'); // French: promise resolved in useEffect [camera]
+                setTimeout(() => {
+                    if (!resolved && video.readyState >= 3) { // HAVE_FUTURE_DATA or more
+                        console.log('⏰ Délai dépassé [ caméra ]: Promesse Play résolue, readyState OK. Forçage viseur prêt.'); // French: Timeout [camera]: Play promise resolved, readyState OK. Forcing viewfinder ready
+                        succeed('play_promise_and_readyState_OK');
+                    }
+                }, 1000);
+            }).catch(playError => {
+                console.warn('⚠️ video.play() promesse rejetée dans useEffect [ caméra ] (politique autoplay?):', playError.name, playError.message); // French: promise rejected in useEffect [camera] (autoplay policy?)
+            });
+
+            const timer = setTimeout(() => {
+                if (!resolved) {
+                   fail(`Temporisation configuration vidéo [ caméra ] après ${timeoutDuration / 1000}s. Dernier readyState: ${video.readyState}`); // French: Video setup timeout [camera] after ... Last readyState
+                }
+            }, timeoutDuration);
+
+            return () => {
+                console.log('🧹 Nettoyage useEffect [ caméra ]: Libération srcObject et écouteurs.'); // French: useEffect cleanup [camera]: Releasing srcObject and listeners
+                clearTimeout(timer);
+                cleanupEventListeners();
+                if (video && video.srcObject) { // Check if video ref is still valid
+                    console.log('🧹 Nettoyage useEffect [ caméra ]: Nullification de video.srcObject.'); // French: Nullifying video.srcObject
+                    video.srcObject = null;
+                }
+                setIsCameraViewfinderReady(false);
+            };
+        } else if (!cameraStream && showCamera) {
+            console.log('📹 useEffect [ caméra ]: cameraStream est nul mais showCamera est vrai. Assurer nettoyage.'); // French: cameraStream is null but showCamera is true. Ensure cleanup
+            setIsCameraViewfinderReady(false);
+        } else {
+            console.log('📹 useEffect [ caméra ]: Conditions non remplies pour la configuration vidéo (showCamera OU cameraStream OU cameraVideoRef.current est faux).', 
+                { showCamera, hasStream: !!cameraStream, hasVidRef: !!cameraVideoRef.current });
+        }
+    }, [cameraStream, showCamera]);
 
     const handleDrag = (e) => {
         e.preventDefault();
@@ -598,25 +736,82 @@ const FileUpload = () => {
     const startCamera = async () => {
         try {
             setCameraError('');
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: { 
-                    width: { ideal: 1280, max: 1280 },
-                    height: { ideal: 720, max: 720 },
-                    facingMode: 'environment', // Use back camera on mobile
-                    frameRate: { ideal: 30, max: 30 }
-                }, 
-                audio: true 
-            });
+            setCameraStream(null); // Reset stream before starting
+            setIsCameraViewfinderReady(false);
+            console.log('🔄 Starting camera acquisition...');
             
-            setCameraStream(stream);
-            if (cameraVideoRef.current) {
-                cameraVideoRef.current.srcObject = stream;
+            if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                throw new Error('Camera access not supported in this browser');
             }
-            setShowCamera(true);
-            console.log('✅ Camera started successfully (max 720p)');
+            
+            // Permission check can stay here, or be part of a pre-flight check
+            try {
+                const permissionStatus = await navigator.permissions.query({ name: 'camera' });
+                console.log('📷 Camera permission status:', permissionStatus.state);
+                if (permissionStatus.state === 'denied') {
+                    throw new Error('Camera permission denied. Please enable camera access in browser settings.');
+                }
+            } catch (permError) {
+                console.warn('⚠️ Permission API not fully supported, or error querying. Will proceed with getUserMedia.');
+            }
+            
+            const constraints = [
+                { video: true, audio: true }, // Try with audio first
+                { video: true }, // Fallback to video only
+                // More specific constraints if needed, but start simple
+                {
+                    video: { 
+                        width: { ideal: 1280, max: 1280 },
+                        height: { ideal: 720, max: 720 },
+                        facingMode: 'environment',
+                        frameRate: { ideal: 30, max: 30 }
+                    }, 
+                    audio: true 
+                }
+            ];
+            
+            let stream = null;
+            let lastError = null;
+            
+            for (let i = 0; i < constraints.length; i++) {
+                try {
+                    console.log(`🔄 Trying camera constraint ${i + 1}:`, JSON.stringify(constraints[i]));
+                    stream = await navigator.mediaDevices.getUserMedia(constraints[i]);
+                    console.log('✅ Camera stream obtained with constraint', i + 1);
+                    break;
+                } catch (error) {
+                    console.warn(`❌ Constraint ${i + 1} (${JSON.stringify(constraints[i])}) failed:`, error.name, error.message);
+                    lastError = error;
+                }
+            }
+            
+            if (!stream) {
+                throw lastError || new Error('Failed to access camera with all constraint attempts');
+            }
+            
+            setCameraStream(stream); // Set the stream
+            setShowCamera(true);     // THEN set showCamera to true to trigger rendering of video element
+            console.log('✅ Camera stream acquired. Video element will now be set up via useEffect.');
+            
         } catch (error) {
-            console.error('❌ Camera access error:', error);
-            setCameraError(`Camera access failed: ${error.message}`);
+            console.error('❌ Camera acquisition error in startCamera:', error.name, error.message);
+            setCameraStream(null);
+            setShowCamera(false);
+            setIsCameraViewfinderReady(false);
+            
+            let errorMessage = 'Camera access failed: ';
+            if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
+                errorMessage += 'Permission denied. Please allow camera access and try again.';
+            } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
+                errorMessage += 'No camera found. Please connect a camera and try again.';
+            } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
+                errorMessage += 'Camera is busy or cannot be read. Please close other apps/tabs using the camera or try a different camera.';
+            } else if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
+                errorMessage += 'The selected camera settings are not supported by your device.';
+            } else {
+                errorMessage += error.message;
+            }
+            setCameraError(errorMessage);
         }
     };
 
@@ -636,79 +831,171 @@ const FileUpload = () => {
         setIsRecording(false);
         setRecordingTime(0);
         setCameraError('');
+        setIsCameraViewfinderReady(false); // Reset when camera stops
         console.log('📷 Camera stopped');
     };
 
     const takePhoto = () => {
+        console.log('📸 Taking photo...');
+        
         if (!cameraVideoRef.current || !canvasRef.current) {
-            alert('Camera not ready');
+            console.error('❌ Video or canvas element not ready');
+            alert('Camera not ready. Please wait for the video to load.');
+            return;
+        }
+
+        if (!cameraStream) {
+            console.error('❌ No camera stream available');
+            alert('Camera stream not available');
             return;
         }
 
         const video = cameraVideoRef.current;
         const canvas = canvasRef.current;
-        const context = canvas.getContext('2d');
 
-        // Set canvas dimensions to match video
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
+        // Check if video has loaded and has dimensions
+        let frameWidth = video.videoWidth;
+        let frameHeight = video.videoHeight;
 
-        // Draw current video frame to canvas
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
-
-        // Convert canvas to blob
-        canvas.toBlob((blob) => {
-            if (blob) {
-                // Create a file from the blob
-                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                const photoFile = new File([blob], `camera-photo-${timestamp}.jpg`, { 
-                    type: 'image/jpeg' 
-                });
-
-                // Add to files list
-                setFiles(prevFiles => [...prevFiles, photoFile]);
-                console.log(`📸 Photo captured: ${photoFile.name} (${(photoFile.size / (1024*1024)).toFixed(2)}MB)`);
-                
-                // Close camera after taking photo
-                stopCamera();
+        if (frameWidth === 0 || frameHeight === 0) {
+            console.warn('⚠️ Video element dimensions are 0. Attempting to use stream track settings as fallback.');
+            const videoTrack = cameraStream.getVideoTracks()[0];
+            if (videoTrack) {
+                const trackSettings = videoTrack.getSettings();
+                frameWidth = trackSettings.width || 0;
+                frameHeight = trackSettings.height || 0;
+                console.log(`📹 Fallback dimensions from track: ${frameWidth}x${frameHeight}`);
             }
-        }, 'image/jpeg', 0.9);
+        }
+        
+        if (frameWidth === 0 || frameHeight === 0) {
+            console.error('❌ Video not loaded or has no dimensions even after fallback. Cannot take photo.');
+            alert('Video not ready. Please wait for the camera to fully load and try again.');
+            return;
+        }
+
+        console.log(`📸 Using dimensions for photo: ${frameWidth}x${frameHeight}`);
+        console.log(`📹 Video ready state: ${video.readyState}`);
+        console.log(`📹 Video paused: ${video.paused}`);
+
+        try {
+            const context = canvas.getContext('2d');
+
+            // Set canvas dimensions to match video frame
+            canvas.width = frameWidth;
+            canvas.height = frameHeight;
+
+            console.log(`🖼️ Canvas dimensions set to: ${canvas.width}x${canvas.height}`);
+
+            // Draw current video frame to canvas
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            // Convert canvas to blob
+            canvas.toBlob((blob) => {
+                if (blob) {
+                    // Create a file from the blob
+                    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                    const photoFile = new File([blob], `camera-photo-${timestamp}.jpg`, { 
+                        type: 'image/jpeg' 
+                    });
+
+                    // Add to files list
+                    setFiles(prevFiles => [...prevFiles, photoFile]);
+                    console.log(`📸 Photo captured: ${photoFile.name} (${(photoFile.size / (1024*1024)).toFixed(2)}MB)`);
+                    
+                    // Show success message
+                    setMessage(`📸 Photo captured successfully: ${photoFile.name}`);
+                    
+                    // Close camera after taking photo
+                    stopCamera();
+                } else {
+                    console.error('❌ Failed to create blob from canvas');
+                    alert('Failed to capture photo. Please try again.');
+                }
+            }, 'image/jpeg', 0.9);
+            
+        } catch (error) {
+            console.error('❌ Error capturing photo:', error);
+            alert(`Photo capture failed: ${error.message}`);
+        }
     };
 
     const startRecording = () => {
+        console.log('🎥 Starting recording...');
+        
         if (!cameraStream) {
+            console.error('❌ Camera stream not available');
             alert('Camera not available');
             return;
         }
 
         try {
-            // Try different WebM codecs for better compression
-            let mimeType = 'video/webm;codecs=vp9';
-            if (!MediaRecorder.isTypeSupported(mimeType)) {
-                mimeType = 'video/webm;codecs=vp8';
-                if (!MediaRecorder.isTypeSupported(mimeType)) {
-                    mimeType = 'video/webm';
-                }
+            // Check MediaRecorder support
+            if (!window.MediaRecorder) {
+                throw new Error('MediaRecorder not supported in this browser');
             }
 
-            const recorder = new MediaRecorder(cameraStream, {
-                mimeType: mimeType,
+            // Try different WebM codecs for better compression and compatibility
+            const codecs = [
+                'video/webm;codecs=vp9,opus',
+                'video/webm;codecs=vp8,opus', 
+                'video/webm;codecs=vp9',
+                'video/webm;codecs=vp8',
+                'video/webm',
+                'video/mp4;codecs=h264,aac',
+                'video/mp4'
+            ];
+            
+            let mimeType = 'video/webm';
+            for (const codec of codecs) {
+                if (MediaRecorder.isTypeSupported(codec)) {
+                    mimeType = codec;
+                    console.log('✅ Using codec:', codec);
+                    break;
+                }
+                console.log('❌ Codec not supported:', codec);
+            }
+            
+            if (!MediaRecorder.isTypeSupported(mimeType)) {
+                console.warn('⚠️ No preferred codecs supported, using default');
+                mimeType = ''; // Let browser choose
+            }
+
+            const options = {
                 videoBitsPerSecond: 1000000 // 1Mbps - good quality but smaller files
-            });
+            };
+            
+            if (mimeType) {
+                options.mimeType = mimeType;
+            }
+
+            console.log('🎥 MediaRecorder options:', options);
+
+            const recorder = new MediaRecorder(cameraStream, options);
 
             const chunks = [];
             
             recorder.ondataavailable = (event) => {
+                console.log('📦 Data chunk received:', event.data.size, 'bytes');
                 if (event.data.size > 0) {
                     chunks.push(event.data);
                 }
             };
 
             recorder.onstop = () => {
-                const blob = new Blob(chunks, { type: mimeType });
+                console.log('🛑 Recording stopped, processing...');
+                const actualMimeType = recorder.mimeType || mimeType || 'video/webm';
+                const blob = new Blob(chunks, { type: actualMimeType });
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-                const videoFile = new File([blob], `camera-video-${timestamp}.webm`, { 
-                    type: 'video/webm' 
+                
+                // Determine file extension
+                let extension = '.webm';
+                if (actualMimeType.includes('mp4')) {
+                    extension = '.mp4';
+                }
+                
+                const videoFile = new File([blob], `camera-video-${timestamp}${extension}`, { 
+                    type: actualMimeType 
                 });
 
                 // Add to files list
@@ -716,11 +1003,24 @@ const FileUpload = () => {
                 const fileSizeMB = (videoFile.size / (1024*1024)).toFixed(2);
                 console.log(`🎥 Video recorded: ${videoFile.name} (${fileSizeMB}MB) - Duration: ${recordingTime}s`);
                 
+                // Show success message
+                setMessage(`🎥 Video recorded successfully: ${videoFile.name} (${fileSizeMB}MB, ${recordingTime}s)`);
+                
                 setRecordedChunks([]);
                 setIsRecording(false);
                 setRecordingTime(0);
                 
                 // Clear timer
+                if (recordingTimer) {
+                    clearInterval(recordingTimer);
+                    setRecordingTimer(null);
+                }
+            };
+
+            recorder.onerror = (event) => {
+                console.error('❌ MediaRecorder error:', event.error);
+                alert(`Recording error: ${event.error.message}`);
+                setIsRecording(false);
                 if (recordingTimer) {
                     clearInterval(recordingTimer);
                     setRecordingTimer(null);
@@ -751,7 +1051,7 @@ const FileUpload = () => {
             }, 1000);
             
             setRecordingTimer(timer);
-            console.log(`🎥 Recording started (max ${MAX_RECORDING_TIME}s, ${mimeType})`);
+            console.log(`🎥 Recording started (max ${MAX_RECORDING_TIME}s, ${mimeType || 'default codec'})`);
             
         } catch (error) {
             console.error('❌ Recording error:', error);
@@ -1480,7 +1780,7 @@ const FileUpload = () => {
                                     autoPlay
                                     playsInline
                                     muted
-                                    style={styles.cameraVideo}
+                                    style={styles.cameraVideo} // Revert to using the defined style
                                 />
                                 {isRecording && (
                                     <div style={{
@@ -1502,7 +1802,7 @@ const FileUpload = () => {
                                     onClick={takePhoto}
                                     style={styles.cameraButton}
                                     className="camera-button"
-                                    disabled={!cameraStream || isRecording}
+                                    disabled={!cameraStream || isRecording || !isCameraViewfinderReady}
                                 >
                                     📸 Take Photo
                                 </button>
@@ -1512,7 +1812,7 @@ const FileUpload = () => {
                                         onClick={startRecording}
                                         style={styles.recordButton}
                                         className="record-button"
-                                        disabled={!cameraStream}
+                                        disabled={!cameraStream || !isCameraViewfinderReady}
                                     >
                                         🎥 Start Recording
                                     </button>
