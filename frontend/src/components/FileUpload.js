@@ -299,31 +299,31 @@ const FileUpload = () => {
         console.log(`📥 Starting chunked download: ${fileInfo.chunks} chunks (${(fileInfo.size / (1024*1024)).toFixed(2)}MB) for ${fileType}`);
         await new Promise(resolve => setTimeout(resolve, 1000)); // Initial delay before download starts
 
-        for (let i = 0; i < fileInfo.chunks; i++) {
-            const chunkUrl = `https://drone-detection-686868741947.europe-west1.run.app/api/download-chunk/${fileInfo.file_id}/${i}`;
-            let retryCount = 0;
-            const maxRetries = 3;
-            let chunkSuccess = false;
-
-            while (!chunkSuccess && retryCount < maxRetries) {
-                try {
+            for (let i = 0; i < fileInfo.chunks; i++) {
+                const chunkUrl = `https://drone-detection-686868741947.europe-west1.run.app/api/download-chunk/${fileInfo.file_id}/${i}`;
+                let retryCount = 0;
+                const maxRetries = 3;
+                let chunkSuccess = false;
+                
+                while (!chunkSuccess && retryCount < maxRetries) {
+                    try {
                     if (retryCount > 0) await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, retryCount), 8000)));
                     
                     const response = await fetch(chunkUrl, { method: 'GET', mode: 'cors', headers: { 'Accept': 'application/json' }});
-                    if (!response.ok) {
+                        if (!response.ok) {
                         const errorData = await response.json().catch(() => ({ error: `HTTP ${response.status}` }));
                         throw new Error(`Chunk ${i+1} download failed: ${errorData.error}`);
                     }
-                    const chunkData = await response.json();
+                        const chunkData = await response.json();
                     if (!chunkData.chunk_data) throw new Error(`Chunk ${i+1} has no data`);
                     
-                    const binaryString = atob(chunkData.chunk_data);
-                    const bytes = new Uint8Array(binaryString.length);
+                            const binaryString = atob(chunkData.chunk_data);
+                            const bytes = new Uint8Array(binaryString.length);
                     for (let j = 0; j < binaryString.length; j++) bytes[j] = binaryString.charCodeAt(j);
-                    chunks.push(bytes);
+                            chunks.push(bytes);
                     chunkSuccess = true;
-                } catch (fetchError) {
-                    retryCount++;
+                    } catch (fetchError) {
+                        retryCount++;
                     if (retryCount >= maxRetries) throw new Error(`Failed chunk ${i+1} after ${maxRetries} attempts: ${fetchError.message}`);
                 }
             }
@@ -331,15 +331,15 @@ const FileUpload = () => {
         }
         
         const combined = new Uint8Array(chunks.reduce((sum, chunk) => sum + chunk.length, 0));
-        let offset = 0;
-        for (const chunk of chunks) {
-            combined.set(chunk, offset);
-            offset += chunk.length;
-        }
-        
-        const blob = new Blob([combined], { type: fileInfo.mime_type });
-        const objectUrl = URL.createObjectURL(blob);
-        
+            let offset = 0;
+            for (const chunk of chunks) {
+                combined.set(chunk, offset);
+                offset += chunk.length;
+            }
+            
+            const blob = new Blob([combined], { type: fileInfo.mime_type });
+            const objectUrl = URL.createObjectURL(blob);
+            
         try { // Cleanup server file
             await fetch(`https://drone-detection-686868741947.europe-west1.run.app/api/cleanup-download/${fileInfo.file_id}`, { method: 'POST', mode: 'cors' });
         } catch (cleanupError) { console.warn('⚠️ Failed to cleanup server file:', cleanupError); }
@@ -582,49 +582,54 @@ const FileUpload = () => {
     // Ensure startCamera, stopCamera, handleCameraChange are defined as per previous steps
     // Ensure takePhoto, startRecording, stopRecording, formatRecordingTime are defined as per previous steps
     
-    const startCamera = async (explicitDeviceId = null) => {
+    const startCamera = async (explicitDeviceIdFromArgs = null) => {
         try {
             setCameraError('');
             setIsCameraViewfinderReady(false);
-            console.log(`🔄 Starting camera acquisition... Explicit device ID requested: ${explicitDeviceId || 'None'}`);
+
+            let explicitDeviceId = null;
+            if (typeof explicitDeviceIdFromArgs === 'string' && explicitDeviceIdFromArgs.trim() !== '') {
+                explicitDeviceId = explicitDeviceIdFromArgs;
+            } else if (explicitDeviceIdFromArgs !== null && explicitDeviceIdFromArgs !== undefined && explicitDeviceIdFromArgs !== '') {
+                // Log if it's not null/undefined/empty but also not a string
+                console.warn(`[startCamera V4] explicitDeviceIdFromArgs was not a valid string but was truthy:`, explicitDeviceIdFromArgs, `(type: ${typeof explicitDeviceIdFromArgs}). Treating as null.`);
+            }
             
+            let currentSelectedIdFromState = '';
+            if (typeof selectedCameraId === 'string') {
+                currentSelectedIdFromState = selectedCameraId;
+            } else if (selectedCameraId && typeof selectedCameraId === 'object' && typeof selectedCameraId.deviceId === 'string') {
+                console.warn(`[startCamera V4] selectedCameraId from state was an object, extracting .deviceId:`, selectedCameraId);
+                currentSelectedIdFromState = selectedCameraId.deviceId;
+            } else if (selectedCameraId) {
+                 console.warn(`[startCamera V4] selectedCameraId from state was not a string or usable object:`, selectedCameraId, `(type: ${typeof selectedCameraId}). Treating as empty string.`);
+            }
+
+            console.log(`🔄 [startCamera V4] BEGIN. explicitDeviceId (cleaned): "${explicitDeviceId}", currentSelectedIdFromState (cleaned): "${currentSelectedIdFromState}"`);
+
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 throw new Error('Camera access not supported in this browser');
             }
-            
-            try {
-                const permissionStatus = await navigator.permissions.query({ name: 'camera' });
-                console.log('📷 Camera permission status:', permissionStatus.state);
-                if (permissionStatus.state === 'denied') {
-                    throw new Error('Camera permission denied. Please enable camera access in browser settings.');
-                }
-            } catch (permError) {
-                console.warn('⚠️ Permission API not fully supported, or error querying. Will proceed with getUserMedia.');
-            }
-            
-            const idealVideoSettings = { 
-                width: { ideal: 1280, max: 1920 },
-                height: { ideal: 720, max: 1080 },
-                frameRate: { ideal: 30, max: 30 }
-            };
 
             let constraintsToTry = [];
-            const deviceIdToUse = explicitDeviceId || selectedCameraId;
+            const deviceIdToUseValue = explicitDeviceId || currentSelectedIdFromState;
+            // Ensure deviceIdToUse is a non-empty string or null.
+            const deviceIdToUse = (typeof deviceIdToUseValue === 'string' && deviceIdToUseValue.trim() !== '') ? deviceIdToUseValue : null;
 
-            if (deviceIdToUse) {
-                console.log(`📷 Attempting to use camera ID: ${deviceIdToUse}`);
-                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse }, ...idealVideoSettings }, audio: true });
-                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse }, ...idealVideoSettings }, audio: false });
-                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse } } }); 
+
+            console.log(`[startCamera V4] Determined deviceIdToUse: "${deviceIdToUse}" (type: ${typeof deviceIdToUse})`);
+
+            if (deviceIdToUse) { // This implies deviceIdToUse is a non-empty string
+                console.log(`[startCamera V4] Trying specific device ID: "${deviceIdToUse}"`);
+                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse } }, audio: true });
+                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse } }, audio: false });
             } else {
-                console.log('📷 No specific camera selected by user. Trying default facing modes.');
-                constraintsToTry.push({ video: { facingMode: 'environment', ...idealVideoSettings }, audio: true });
-                constraintsToTry.push({ video: { facingMode: 'environment', ...idealVideoSettings }, audio: false });
-                constraintsToTry.push({ video: { facingMode: 'user', ...idealVideoSettings }, audio: true });
-                constraintsToTry.push({ video: { facingMode: 'user', ...idealVideoSettings }, audio: false });
-                constraintsToTry.push({ video: { ...idealVideoSettings }, audio: true });
-                constraintsToTry.push({ video: { ...idealVideoSettings }, audio: false });
-                constraintsToTry.push({ video: true, audio: true });
+                console.log('[startCamera V4] No specific valid camera ID. Trying generic fallbacks.');
+                constraintsToTry.push({ video: { facingMode: 'environment' }, audio: true });
+                constraintsToTry.push({ video: { facingMode: 'environment' }, audio: false });
+                constraintsToTry.push({ video: { facingMode: 'user' }, audio: true });
+                constraintsToTry.push({ video: { facingMode: 'user' }, audio: false });
+                constraintsToTry.push({ video: true, audio: true }); // Simplest possible video constraint
                 constraintsToTry.push({ video: true, audio: false });
             }
             
@@ -633,102 +638,96 @@ const FileUpload = () => {
             
             for (let i = 0; i < constraintsToTry.length; i++) {
                 try {
-                    console.log(`🔄 Trying constraint set ${i + 1}/${constraintsToTry.length}:`, JSON.stringify(constraintsToTry[i]));
+                    console.log(`[startCamera V4] Attempt ${i + 1}/${constraintsToTry.length} with constraints:`, constraintsToTry[i]);
                     newStream = await navigator.mediaDevices.getUserMedia(constraintsToTry[i]);
-                    console.log('✅ Camera stream obtained with constraint set', i + 1, newStream.id);
-                    newStream.getVideoTracks().forEach(track => console.log('📹 Actual video track settings:', JSON.stringify(track.getSettings())));
-                    newStream.getAudioTracks().forEach(track => console.log('🎤 Actual audio track settings:', JSON.stringify(track.getSettings())));
+                    console.log('✅ [startCamera V4] Stream obtained:', newStream.id);
+                    newStream.getVideoTracks().forEach(track => console.log('📹 Video track:', track.id, track.label, track.getSettings()));
+                    newStream.getAudioTracks().forEach(track => console.log('🎤 Audio track:', track.id, track.label, track.getSettings()));
                     break; 
-                } catch (error) { // local error, not the component state error
-                    console.warn(`❌ Constraint set ${i + 1} failed:`, error.name, error.message);
+                } catch (error) {
+                    console.warn(`❌ [startCamera V4] Constraint set ${i + 1} failed:`, error.name, error.message, constraintsToTry[i]);
                     lastError = error;
                 }
             }
             
             if (!newStream) {
+                console.error('❌ [startCamera V4] All constraint attempts failed. Last error:', lastError);
                 throw lastError || new Error('Failed to access camera with all constraint attempts');
             }
 
             if (cameraStream && cameraStream.id !== newStream.id) {
-                console.log ( `🛑 Stopping tracks of old stream ${cameraStream.id} before setting new stream ${newStream.id}`);
+                console.log('[startCamera V4] Stopping old stream:', cameraStream.id);
                 cameraStream.getTracks().forEach(track => track.stop());
             }
             
             setCameraStream(newStream);
             setShowCamera(true);    
-            console.log('✅ Camera stream acquired and set. Video element will now be set up via useEffect.');
+            console.log('[startCamera V4] Stream acquisition SUCCESS. useEffect will configure video element.');
 
             try {
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
                 setAvailableCameras(videoDevices);
-                console.log('📷 Available video devices:', videoDevices.map(d => ({id: d.deviceId, label: d.label, kind: d.kind}) ));
-                
-                // New logic to synchronize selectedCameraId with the actual stream
-                const currentStreamVideoTrack = newStream.getVideoTracks()[0];
+                console.log('🕵️ [startCamera V4 DEBUG] availableCameras set. Count:', videoDevices.length, 'Example deviceId type:', videoDevices[0]?.deviceId ? typeof videoDevices[0].deviceId : 'N/A');
+
+                const currentStreamVideoTrack = newStream?.getVideoTracks()?.[0];
                 const actualDeviceIdFromStream = currentStreamVideoTrack?.getSettings?.().deviceId;
 
-                console.log(`[CameraSync] User explicitly selected ID before this stream: ${selectedCameraId}, Actual stream's device ID: ${actualDeviceIdFromStream}`);
+                let idToSelect = currentSelectedIdFromState; // Start with current (cleaned) state
 
-                if (actualDeviceIdFromStream && videoDevices.some(d => d.deviceId === actualDeviceIdFromStream)) {
-                    // The active stream has a device ID that's in our list of available cameras.
-                    // Set the dropdown to this device ID.
-                    if (selectedCameraId !== actualDeviceIdFromStream) {
-                        console.log(`🔄 [CameraSync] Dropdown was ${selectedCameraId}, now setting to actual stream ID ${actualDeviceIdFromStream} to match active feed.`);
-                        setSelectedCameraId(actualDeviceIdFromStream);
+                if (typeof actualDeviceIdFromStream === 'string' && actualDeviceIdFromStream.trim() !== '') {
+                    const matchingEnumeratedDevice = videoDevices.find(d => d.deviceId === actualDeviceIdFromStream);
+                    if (matchingEnumeratedDevice) {
+                        idToSelect = actualDeviceIdFromStream; // Prefer actual stream ID if valid
                     } else {
-                        console.log(`✅ [CameraSync] Dropdown ${selectedCameraId} already matches actual stream ID ${actualDeviceIdFromStream}.`);
-                    }
-                } else if (videoDevices.length > 0) {
-                    // Active stream's device ID is not good, or no stream track.
-                    // If dropdown isn't already set to a valid available camera, pick a default.
-                    // This handles initial load or bad stream device ID cases.
-                    const currentSelectionIsValid = selectedCameraId && videoDevices.some(d => d.deviceId === selectedCameraId);
-                    if (!currentSelectionIsValid) {
-                        console.warn(`⚠️ [CameraSync] Current selection ${selectedCameraId} is invalid OR stream's device ID (${actualDeviceIdFromStream}) is problematic. Defaulting camera selection.`);
-                        // Try to pick a 'back' camera first, then the first device.
-                        const backCamera = videoDevices.find(d => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
-                        const defaultDevice = backCamera || videoDevices[0];
-                        if (defaultDevice) {
-                             console.log(`📹 [CameraSync] Defaulting to ${defaultDevice.label} (${defaultDevice.deviceId})`);
-                             setSelectedCameraId(defaultDevice.deviceId);
-                        } else {
-                             setSelectedCameraId(''); // Should not happen if videoDevices.length > 0
-                        }
-                    } else {
-                         console.log(`ℹ️ [CameraSync] Stream's device ID (${actualDeviceIdFromStream}) problematic, but current selection ${selectedCameraId} is valid. Keeping it for now.`);
-                         // setSelectedCameraId(selectedCameraId); // No change needed
+                         console.warn(`[startCamera V4 Sync] actualDeviceIdFromStream (${actualDeviceIdFromStream}) not found in enumerated devices.`);
                     }
                 } else {
-                    // No available video devices found during enumeration.
-                    console.warn('[CameraSync] No available video devices found. Clearing selectedCameraId.');
-                    setSelectedCameraId('');
+                    console.log('[startCamera V4 Sync] No valid actualDeviceIdFromStream.');
                 }
-                // End of new logic
-            } catch (enumError) { // local enumError
-                console.error('❌ Error enumerating devices:', enumError);
+                
+                // If idToSelect is still not a valid device from the list, or is empty, pick the first available one
+                if (!idToSelect || !videoDevices.some(d => d.deviceId === idToSelect)) {
+                    if (videoDevices.length > 0 && typeof videoDevices[0].deviceId === 'string') {
+                         console.log(`[startCamera V4 Sync] idToSelect ("${idToSelect}") is invalid or empty. Defaulting to first enumerated: ${videoDevices[0].deviceId}`);
+                        idToSelect = videoDevices[0].deviceId;
+                    } else {
+                        console.log(`[startCamera V4 Sync] No valid device to select for dropdown sync.`);
+                        idToSelect = ''; // Fallback to empty if no valid devices
+                    }
+                }
+
+                if (selectedCameraId !== idToSelect) { // selectedCameraId is the original state value here
+                    console.log(`[startCamera V4 Sync] Updating selectedCameraId state from "${selectedCameraId}" to "${idToSelect}"`);
+                    setSelectedCameraId(idToSelect);
+                }
+
+            } catch (enumError) {
+                console.error('❌ [startCamera V4] Error during device enumeration or dropdown sync:', enumError);
             }
             
-        } catch (error) { // Component state error
-            console.error('❌ Camera acquisition error in startCamera:', error.name, error.message);
+        } catch (error) {
+            console.error('❌ [startCamera V4] Overall error in function:', error.name, error.message);
+            if (cameraStream) { // Ensure any acquired stream is stopped on error
+                cameraStream.getTracks().forEach(track => track.stop());
+            }
             setCameraStream(null);
             setShowCamera(false);
             setIsCameraViewfinderReady(false);
             setAvailableCameras([]);
-            
-            let errorMessage = 'Camera access failed: ';
+            let errorMessageText = 'Camera access failed: ';
             if (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError') {
-                errorMessage += 'Permission denied. Please allow camera access and try again.';
+                errorMessageText += 'Permission denied. Please check browser settings.';
             } else if (error.name === 'NotFoundError' || error.name === 'DevicesNotFoundError') {
-                errorMessage += 'No camera found. Please connect a camera and try again.';
+                errorMessageText += 'No camera found. Ensure it\'s connected and enabled.';
             } else if (error.name === 'NotReadableError' || error.name === 'TrackStartError') {
-                errorMessage += 'Camera is busy or cannot be read. Please close other apps/tabs using the camera or try a different camera.';
+                errorMessageText += 'Camera is busy or unreadable. Try closing other apps using the camera.';
             } else if (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError') {
-                errorMessage += 'The selected camera settings are not supported by your device/browser.';
+                errorMessageText += 'The selected camera settings are not supported by your device/browser. Try another camera or default settings.';
             } else {
-                errorMessage += error.message;
+                errorMessageText += error.message || 'Unknown camera error.';
             }
-            setCameraError(errorMessage);
+            setCameraError(errorMessageText);
         }
     };
 
@@ -759,19 +758,45 @@ const FileUpload = () => {
     };
 
     const handleCameraChange = async (event) => {
-        const newCameraId = event.target.value;
-        console.log(`📷 User selected new camera: ${newCameraId}`);
-        setSelectedCameraId(newCameraId);
+        const valFromEvent = event.target.value;
+        let newDeviceId = ''; // Default to empty string
+
+        console.log(`[handleCameraChange V4] event.target.value: "${valFromEvent}" (type: ${typeof valFromEvent})`);
+
+        if (typeof valFromEvent === 'string') {
+            newDeviceId = valFromEvent;
+        } else if (valFromEvent && typeof valFromEvent === 'object' && typeof valFromEvent.deviceId === 'string') {
+            // This case is if event.target.value was unexpectedly an object (e.g., MediaDeviceInfo itself)
+            // This should not happen with standard HTML select/option behavior where option value is a string.
+            console.warn('[handleCameraChange V4] event.target.value was an object, extracting .deviceId. This is unexpected for a select onChange.');
+            newDeviceId = valFromEvent.deviceId;
+        } else {
+            console.warn(`[handleCameraChange V4] event.target.value ("${valFromEvent}") is not a usable string. Treating as empty selection.`);
+            // newDeviceId remains ''
+        }
+
+        // Ensure newDeviceId is a string, even if empty
+        newDeviceId = String(newDeviceId);
+
+        console.log(`[handleCameraChange V4] Determined newDeviceId to use: "${newDeviceId}" (type: ${typeof newDeviceId})`);
+        
+        // Update the state. This will also update the <select> value prop.
+        setSelectedCameraId(newDeviceId); 
 
         if (cameraStream) {
-            console.log('🛑 Stopping current camera to switch...');
+            console.log('[handleCameraChange V4] Stopping current camera stream to switch. Stream ID:', cameraStream.id);
             cameraStream.getTracks().forEach(track => track.stop());
-            setCameraStream(null); 
+            setCameraStream(null); // Nullify the stream state
+            setIsCameraViewfinderReady(false); // Reset viewfinder readiness
         }
         
+        // Call startCamera with the explicitly selected (and cleaned) newDeviceId.
+        // The slight delay helps ensure the old stream is fully released.
+        console.log(`[handleCameraChange V4] Scheduling startCamera with explicitId: "${newDeviceId}" in 250ms`);
         setTimeout(async () => {
-             await startCamera(newCameraId); 
-        }, 50);
+             console.log(`[handleCameraChange V4 TIMEOUT] Calling startCamera. explicitId: "${newDeviceId}". Current selectedCameraId state (for ref): "${selectedCameraId}"`);
+             await startCamera(newDeviceId); 
+        }, 250);
     };
 
     const takePhoto = () => {
@@ -1044,7 +1069,7 @@ const FileUpload = () => {
                                 Selected {files.length} file(s): {files.map(f => `${f.name} (${(f.size / (1024*1024)).toFixed(1)}MB)`).join(', ')}
                             </div>
                         )}
-
+                        
                         {loading && (
                             <div style={styles.progressContainer}>
                                 <div style={styles.progressBar}><div style={{...styles.progressFill, width: `${processingProgress}%` }}></div></div>
@@ -1131,7 +1156,7 @@ const FileUpload = () => {
                                 <label style={styles.sliderLabel}>Confidence Threshold: {confidenceThreshold.toFixed(1)}</label>
                                 <input type="range" min="0.1" max="0.9" step="0.1" value={confidenceThreshold} onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))} style={styles.slider} />
                                 <div style={styles.sliderValue}>Higher values extract only high-confidence detections.</div>
-                            </div>
+                                </div>
                             <button onClick={extractTrainingDataAll} disabled={extractingTrainingData || files.filter(f => f.type.startsWith('image/')).length === 0} style={{...styles.extractButton, opacity: (extractingTrainingData || files.filter(f => f.type.startsWith('image/')).length === 0) ? 0.6 : 1}} className="extract-button">
                                 {extractingTrainingData && <span style={styles.loadingSpinner}></span>}
                                 {extractingTrainingData ? 'Extracting...' : `📦 Extract Dataset from ${files.filter(f => f.type.startsWith('image/')).length} Image(s)`}
@@ -1177,15 +1202,15 @@ const FileUpload = () => {
                                                     <div style={{flex: 1, textAlign: 'center'}}>
                                                         <p style={{fontSize: '0.75rem', color: '#6b7280', marginBottom: '0.5rem'}}>Processed</p>
                                                         {result.fileType === 'video' ? <video src={result.processed} controls style={styles.media} className="media"/> : <img src={result.processed} alt={`Processed ${result.filename}`} style={styles.media} className="media"/>}
-                                                    </div>
-                                                )}
-                                            </div>
+                                </div>
+                                        )}
+                                    </div>
                                             <div style={{display: 'flex', gap: '0.5rem', marginTop: '1rem'}}>
                                                 <button onClick={() => downloadSingleImage(result.original, result.filename, 'original')} style={{...styles.downloadButton, flex: 1}} className="download-button">📥 Original</button>
                                                 <button onClick={() => downloadSingleImage(result.processed, result.filename, 'processed')} style={{...styles.downloadButton, flex: 1}} className="download-button">📥 Processed</button>
-                                            </div>
+                                </div>
                                         </>
-                                    )}
+                            )}
                                 </div>
                             ))}
                         </div>
