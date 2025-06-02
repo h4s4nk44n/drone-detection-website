@@ -106,29 +106,130 @@ def cleanup_old_files():
     current_time = time.time()
     expired_files = []
     
-    for file_id, file_info in temp_files.items():
-        # Don't cleanup files currently being downloaded
-        if file_id in active_downloads:
-            print(f"⏳ Skipping cleanup of active download: {file_id}")
+    temp_dir_path = tempfile.gettempdir() # Get temp dir path once
+
+    # First, get all file_ids from temp_files and potentially from orphaned metadata
+    all_known_file_ids = set(temp_files.keys())
+    try:
+        for item_name in os.listdir(temp_dir_path):
+            if item_name.endswith('_metadata.json'):
+                all_known_file_ids.add(item_name.replace('_metadata.json', ''))
+    except OSError as e:
+        print(f"⚠️ Error listing temp directory for cleanup: {e}")
+
+
+    for file_id in list(all_known_file_ids): # Iterate over a copy if modifying temp_files
+        # Check for filesystem lock first, most robust cross-worker
+        lock_file_path = os.path.join(temp_dir_path, f"{file_id}.active_download_lock")
+        if os.path.exists(lock_file_path):
+            # Check lock file age, remove stale locks (e.g., older than 15 mins)
+            try:
+                lock_age = current_time - os.path.getmtime(lock_file_path)
+                if lock_age > 900: # 15 minutes
+                    print(f"🔒 Removing stale lock file for {file_id} (age: {lock_age:.0f}s)")
+                    os.unlink(lock_file_path)
+                else:
+                    print(f"🔒 Skipping cleanup of {file_id} due to active lock file (age: {lock_age:.0f}s).")
+                    continue
+            except OSError: # File might have been removed between exists() and getmtime()
+                pass # Proceed with other checks
+
+        # If not locked, proceed with existing logic (in-memory active_downloads and last_accessed)
+        if file_id in active_downloads: # Check in-memory set for the current worker
+            print(f"⏳ Skipping cleanup of active download (in-memory): {file_id}")
             continue
-            
-        # Increased cleanup time to 2 hours to prevent issues with large chunked downloads
-        # Also check last_accessed time to keep recently used files
-        last_access = file_info.get('last_accessed', file_info['created'])
-        # Increase time to 4 hours for better stability
-        if current_time - last_access > 14400:  # 4 hours since last access
-            expired_files.append(file_id)
-    
+
+        file_info = temp_files.get(file_id)
+        if not file_info:
+            # If not in memory, try to load metadata to check its age
+            try:
+                metadata_path = os.path.join(temp_dir_path, f"{file_id}_metadata.json")
+                if os.path.exists(metadata_path):
+                    with open(metadata_path, 'r') as f:
+                        disk_file_info = json.load(f)
+                    file_info = disk_file_info # Use this for age check
+                    print(f"📋 Checked disk metadata for cleanup decision for {file_id}")
+                else:
+                    # No metadata, no in-memory entry, and no lock file. If a stray data file exists, it's an orphan.
+                    # This case is implicitly handled by iterating known_file_ids and then trying to delete.
+                    # If only a .data file exists without metadata or lock, it would not be in all_known_file_ids unless temp_files had it.
+                    pass # Fall through to potential deletion if it was in temp_files but now metadata is gone
+            except Exception as e:
+                print(f"⚠️ Error reading metadata for cleanup decision on {file_id}: {e}")
+                # Potentially skip if unsure, or proceed to delete if old
+                # For now, if we can't read its metadata, and it's not locked, assume it might be old if in temp_files
+                if file_id in temp_files: # If it was in memory, use that info
+                  file_info = temp_files.get(file_id)
+                else: # No info at all, can't decide age
+                  continue
+
+
+        if file_info: # If we have info either from memory or disk
+            last_access = file_info.get('last_accessed', file_info.get('created', 0))
+            if current_time - last_access > 14400:  # 4 hours since last access
+                expired_files.append(file_id)
+            else:
+                age_hours = (current_time - last_access) / 3600
+                print(f" फाइल {file_id} is not expired. Age: {age_hours:.1f} hours.")
+        elif file_id not in temp_files and not os.path.exists(os.path.join(temp_dir_path, f"{file_id}_metadata.json")):
+            # This file_id came from listdir but has no corresponding metadata or in-memory entry.
+            # It might be a stray .data file or an incomplete upload. Risky to delete without more info.
+            # However, our primary loop is based on all_known_file_ids from metadata and temp_files.
+            # This 'else' branch for file_info might not be hit if file_id was only from listdir and not in temp_files.
+            # Let's refine: if it's in all_known_file_ids it must have had metadata or been in temp_files.
+            # If file_info is None here, it means it was in all_known_file_ids (e.g. from temp_files) but metadata failed to load.
+            # If it's truly old and was in temp_files, it will be added to expired_files.
+             print(f" File {file_id} has no readily available file_info for age check, might be cleaned if it was in temp_files and deemed old.")
+             # If it was in temp_files and its 'created' time is old, it would be caught.
+             # This path is tricky. The main thing is, if it's locked, it's safe.
+             # If not locked, and old by its metadata (or temp_files entry), it gets cleaned.
+
     for file_id in expired_files:
         try:
-            file_info = temp_files[file_id]
-            if os.path.exists(file_info['path']):
-                os.unlink(file_info['path'])
-            del temp_files[file_id]
-            remove_temp_file_metadata(file_id)
-            print(f"🧹 Cleaned up expired file: {file_id}")
-        except:
-            pass
+            # Double check lock file one last time before deleting
+            lock_file_path = os.path.join(temp_dir_path, f"{file_id}.active_download_lock")
+            if os.path.exists(lock_file_path):
+                lock_age = current_time - os.path.getmtime(lock_file_path)
+                if lock_age <= 900: # Still fresh lock
+                    print(f"🔒 Final check: Skipping delete of {file_id} due to active lock file (age: {lock_age:.0f}s).")
+                    continue
+                else:
+                    print(f"🔒 Final check: Removing stale lock for {file_id} before deleting data.")
+                    os.unlink(lock_file_path)
+
+
+            file_info_to_delete = temp_files.get(file_id)
+            path_to_delete = None
+
+            if file_info_to_delete:
+                path_to_delete = file_info_to_delete.get('path')
+            else:
+                # Try to get path from metadata if not in memory
+                try:
+                    metadata_path_to_delete = os.path.join(temp_dir_path, f"{file_id}_metadata.json")
+                    if os.path.exists(metadata_path_to_delete):
+                        with open(metadata_path_to_delete, 'r') as f:
+                            disk_file_info_to_delete = json.load(f)
+                        path_to_delete = disk_file_info_to_delete.get('path')
+                except Exception as e:
+                    print(f"⚠️ Could not read metadata for path during deletion of {file_id}: {e}")
+            
+            if path_to_delete and os.path.exists(path_to_delete):
+                os.unlink(path_to_delete)
+                print(f"🧹 Cleaned up expired data file: {path_to_delete} for {file_id}")
+            elif path_to_delete:
+                print(f"⚠️ Data file for {file_id} already gone: {path_to_delete}")
+            else:
+                print(f"⚠️ No path found to delete data file for {file_id}")
+
+            if file_id in temp_files:
+                del temp_files[file_id]
+            
+            remove_temp_file_metadata(file_id) # This removes the _metadata.json
+            print(f"🧹 Cleaned up tracking for expired file: {file_id}")
+
+        except Exception as e:
+            print(f"❌ Error during cleanup of {file_id}: {e}")
 
 def ensure_file_ready(file_path, expected_size, timeout=30):
     """Wait for file to be fully written before marking as ready"""
@@ -647,11 +748,22 @@ def process_uploaded():
 @app.route('/api/download-chunk/<file_id>/<int:chunk_index>', methods=['GET'])
 def download_chunk(file_id, chunk_index):
     """Download a specific chunk of a processed file"""
+    lock_file_path = os.path.join(tempfile.gettempdir(), f"{file_id}.active_download_lock")
+    created_lock_this_request = False
     try:
         print(f"📥 Download request: file_id={file_id}, chunk={chunk_index}")
-        print(f"📊 Current temp_files count: {len(temp_files)}")
         
-        # Mark file as actively being downloaded
+        # Create/touch lock file to show activity
+        if not os.path.exists(lock_file_path):
+            open(lock_file_path, 'a').close()
+            created_lock_this_request = True
+            print(f"🔒 Created lock file: {lock_file_path}")
+        else:
+            # Touch the lock file to update its modification time
+            os.utime(lock_file_path, None) 
+            print(f"🔒 Touched lock file: {lock_file_path}")
+
+        # Mark file as actively being downloaded (in-memory for this worker)
         active_downloads.add(file_id)
         
         # First check if file exists in memory
@@ -842,8 +954,14 @@ def download_chunk(file_id, chunk_index):
         
         # Only remove from active downloads if this was the last chunk
         if chunk_index == file_info['chunks'] - 1:
-            print(f"📋 Last chunk for {file_id}, removing from active downloads")
+            print(f"📋 Last chunk for {file_id}, removing from active downloads (in-memory) and lock file.")
             active_downloads.discard(file_id)
+            if os.path.exists(lock_file_path):
+                try:
+                    os.unlink(lock_file_path)
+                    print(f"🔒 Removed lock file on completion: {lock_file_path}")
+                except OSError as e:
+                    print(f"⚠️ Error removing lock file {lock_file_path} on completion: {e}")
         
         return response
         
@@ -852,8 +970,21 @@ def download_chunk(file_id, chunk_index):
         print(f"❌ Error type: {type(e).__name__}")
         import traceback
         traceback.print_exc()
-        # Always remove from active downloads on error
+        # Always remove from active downloads on error for this worker
         active_downloads.discard(file_id)
+        # Attempt to remove lock file on error too, as this download attempt for this chunk failed.
+        # Only if this request created it, or if it's an unrecoverable error for the file_id.
+        # For now, let's be cautious: only remove if last chunk or truly fatal error for file_id.
+        # The stale lock cleanup in `cleanup_old_files` will handle abandoned locks.
+        # However, if it's a "File not found" type error, the lock is for a non-existent file.
+        if isinstance(e, FileNotFoundError) or "File not found" in str(e) or "No metadata found" in str(e):
+            if os.path.exists(lock_file_path):
+                try:
+                    os.unlink(lock_file_path)
+                    print(f"🔒 Removed lock file due to file not found error: {lock_file_path}")
+                except OSError as unlink_e:
+                    print(f"⚠️ Error removing lock file {lock_file_path} on file not found error: {unlink_e}")
+
         response = jsonify({"error": f"Failed to serve chunk: {str(e)}"})
         response.headers['Access-Control-Allow-Origin'] = '*'
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
