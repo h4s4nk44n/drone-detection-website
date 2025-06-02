@@ -488,32 +488,35 @@ const FileUpload = () => {
 
     const extractTrainingDataAll = async () => {
         if (files.length === 0) {
-            alert('Please select and process some images first (videos are not used for bulk training data extraction).');
+            alert('Please select and process some files first (images or videos).');
             return;
         }
 
-        const imageFilesForTraining = files.filter(f => f.type.startsWith('image/'));
+        // No longer filter for only images here, send all files
+        // const imageFilesForTraining = files.filter(f => f.type.startsWith('image/'));
+        const filesForTraining = files; // Send all files
 
-        if (imageFilesForTraining.length === 0) {
-            setMessage('ℹ️ No image files selected to extract training data from.');
-            alert('No image files selected to extract training data from.');
+        if (filesForTraining.length === 0) {
+            // This case should ideally not be hit if files.length > 0 check passes
+            setMessage('ℹ️ No files selected to extract training data from.');
+            alert('No files selected to extract training data from.');
             return;
         }
 
         setExtractingTrainingData(true);
-        setMessage('🎯 Extracting training data for all images...');
-        setTrainingDataResults([]); // Clear previous individual results
-        setBulkTrainingData(null);  // Clear previous bulk result
+        setMessage(`🎯 Extracting training data for all ${filesForTraining.length} selected file(s)...`);
+        setTrainingDataResults([]); 
+        setBulkTrainingData(null);  
         setError('');
 
         try {
             const formData = new FormData();
-            imageFilesForTraining.forEach(file => {
+            filesForTraining.forEach(file => {
                 formData.append('files', file);
             });
             formData.append('confidence', confidenceThreshold.toString());
 
-            setMessage(`🎯 Processing ${imageFilesForTraining.length} images for training data extraction...`);
+            setMessage(`🎯 Processing ${filesForTraining.length} file(s) for training data extraction... (videos may take longer)`);
 
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/extract-training-data-bulk', {
                 method: 'POST',
@@ -540,7 +543,7 @@ const FileUpload = () => {
             const filesWithDetectionsCount = (responseData.files_with_detections || []).length;
             const filesWithoutDetectionsCount = (responseData.files_without_detections || []).length;
             
-            setMessage(`✅ Training data extraction complete: ${responseData.extracted_count} samples from ${filesWithDetectionsCount}/${imageFilesForTraining.length} images. ${filesWithoutDetectionsCount} images had no detections.`);
+            setMessage(`✅ Training data extraction complete: ${responseData.extracted_count} samples from ${filesWithDetectionsCount}/${filesForTraining.length} files. ${filesWithoutDetectionsCount} files had no detections.`);
 
         } catch (error) {
             console.error('❌ Error in bulk training data extraction:', error);
@@ -1151,21 +1154,21 @@ const FileUpload = () => {
                     {showTrainingExtraction && (
                         <div style={styles.trainingSection}>
                             <h3 style={styles.trainingHeader}>🎯 Extract Training Dataset</h3>
-                            <p style={styles.trainingDescription}>Generate YOLO format training data from uploaded images. Creates a combined dataset from multiple image files where drones are detected.</p>
+                            <p style={styles.trainingDescription}>Generate YOLO format training data from uploaded images and videos. Creates a combined dataset from multiple files where drones are detected.</p>
                             <div style={styles.sliderContainer}>
                                 <label style={styles.sliderLabel}>Confidence Threshold: {confidenceThreshold.toFixed(1)}</label>
                                 <input type="range" min="0.1" max="0.9" step="0.1" value={confidenceThreshold} onChange={(e) => setConfidenceThreshold(parseFloat(e.target.value))} style={styles.slider} />
                                 <div style={styles.sliderValue}>Higher values extract only high-confidence detections.</div>
                                 </div>
-                            <button onClick={extractTrainingDataAll} disabled={extractingTrainingData || files.filter(f => f.type.startsWith('image/')).length === 0} style={{...styles.extractButton, opacity: (extractingTrainingData || files.filter(f => f.type.startsWith('image/')).length === 0) ? 0.6 : 1}} className="extract-button">
+                            <button onClick={extractTrainingDataAll} disabled={extractingTrainingData || files.length === 0} style={{...styles.extractButton, opacity: (extractingTrainingData || files.length === 0) ? 0.6 : 1}} className="extract-button">
                                 {extractingTrainingData && <span style={styles.loadingSpinner}></span>}
-                                {extractingTrainingData ? 'Extracting...' : `📦 Extract Dataset from ${files.filter(f => f.type.startsWith('image/')).length} Image(s)`}
+                                {extractingTrainingData ? 'Extracting...' : `📦 Extract Dataset from ${files.length} File(s)`}
                             </button>
                             {bulkTrainingData && ( // Display for bulk training data
                                 <div style={styles.trainingResult}>
-                                    <div style={styles.trainingResultText}>Total Samples: {bulkTrainingData.total_samples} from {bulkTrainingData.files_included_count} images</div>
+                                    <div style={styles.trainingResultText}>Total Samples: {bulkTrainingData.total_samples} from {bulkTrainingData.files_included_count} files</div>
                                     {bulkTrainingData.files_without_detections_list && bulkTrainingData.files_without_detections_list.length > 0 && (
-                                        <div style={{...styles.trainingResultText, color: '#d97706'}}>⚠️ {bulkTrainingData.files_without_detections_list.length} image(s) had no detections.</div>
+                                        <div style={{...styles.trainingResultText, color: '#d97706'}}>⚠️ {bulkTrainingData.files_without_detections_list.length} file(s) had no detections.</div>
                                     )}
                                     <div style={styles.trainingResultText}>Confidence Used: {bulkTrainingData.confidence_threshold.toFixed(1)}</div>
                                     <button onClick={downloadBulkTrainingData} style={{...styles.downloadButton, marginTop: '1rem', width: '100%', fontSize: '1rem', padding: '0.75rem'}}>
