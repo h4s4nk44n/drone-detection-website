@@ -17,7 +17,6 @@ const FileUpload = () => {
     const [extractingTrainingData, setExtractingTrainingData] = useState(false);
     const [showTrainingExtraction, setShowTrainingExtraction] = useState(false);
     const [confidenceThreshold, setConfidenceThreshold] = useState(0.3);
-    const [trainingDataResults, setTrainingDataResults] = useState([]); // For displaying results of individual file extraction (now largely for bulk)
     const [bulkTrainingData, setBulkTrainingData] = useState(null); // For storing the combined bulk training data
 
     // Camera functionality state
@@ -25,7 +24,6 @@ const FileUpload = () => {
     const [cameraStream, setCameraStream] = useState(null);
     const [isRecording, setIsRecording] = useState(false);
     const [mediaRecorder, setMediaRecorder] = useState(null);
-    const [recordedChunks, setRecordedChunks] = useState([]); // Keep this if you plan to re-implement client-side chunk accumulation for MediaRecorder
     const [cameraError, setCameraError] = useState('');
     const [recordingTime, setRecordingTime] = useState(0);
     const [recordingTimer, setRecordingTimer] = useState(null);
@@ -85,6 +83,7 @@ const FileUpload = () => {
                 clearInterval(timerIdToClearOnUnmount);
             }
         };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Empty dependency: runs only on mount and unmount
 
     // Effect to setup video element when cameraStream is ready and showCamera is true
@@ -307,7 +306,10 @@ const FileUpload = () => {
                 
                 while (!chunkSuccess && retryCount < maxRetries) {
                     try {
-                    if (retryCount > 0) await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, retryCount), 8000)));
+                    if (retryCount > 0) {
+                        const currentDelayRetryCount = retryCount; // Capture retryCount for this iteration's delay
+                        await new Promise(resolve => setTimeout(resolve, Math.min(1000 * Math.pow(2, currentDelayRetryCount), 8000)));
+                    }
                     
                     const response = await fetch(chunkUrl, { method: 'GET', mode: 'cors', headers: { 'Accept': 'application/json' }});
                         if (!response.ok) {
@@ -477,7 +479,6 @@ const FileUpload = () => {
     const clearAll = () => {
         setFiles([]);
         setResults([]);
-        setTrainingDataResults([]);
         setBulkTrainingData(null);
         setMessage('');
         setError('');
@@ -505,7 +506,6 @@ const FileUpload = () => {
 
         setExtractingTrainingData(true);
         setMessage(`🎯 Extracting training data for all ${filesForTraining.length} selected file(s)...`);
-        setTrainingDataResults([]); 
         setBulkTrainingData(null);  
         setError('');
 
@@ -1046,7 +1046,7 @@ const FileUpload = () => {
 
             <nav style={styles.navbar}>
                 <div style={styles.navContent}>
-                    <div style={styles.logo}>DroneDetect AI</div>
+                    <img src="/logo.png" alt="DroneDetect AI Logo" style={{ height: '40px' }} />
                     <div style={{...styles.statusBadge, backgroundColor: serverStatus === 'connected' ? '#dcfce7' : serverStatus === 'error' ? '#fee2e2' : '#fef9c3', color: serverStatus === 'connected' ? '#166534' : serverStatus === 'error' ? '#991b1b' : '#713f12' }}>
                         ● {serverStatus === 'connected' ? 'Connected' : serverStatus === 'error' ? 'Error' : 'Checking...'}
                     </div>
