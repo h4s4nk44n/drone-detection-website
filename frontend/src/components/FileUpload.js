@@ -451,42 +451,6 @@ const FileUpload = () => {
         });
     };
 
-    const extractTrainingDataSingle = async (file, result) => {
-        try {
-            const formData = new FormData();
-            // We need to recreate the file from the result, or process the original file
-            // For simplicity, let's process the original file again
-            const originalFile = files.find(f => f.name === result.filename);
-            if (!originalFile) {
-                throw new Error('Original file not found');
-            }
-
-            formData.append('file', originalFile);
-            formData.append('confidence', confidenceThreshold.toString());
-
-            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/extract-training-data', {
-                method: 'POST',
-                body: formData,
-                mode: 'cors'
-            });
-
-            if (!response.ok) {
-                const errorData = await response.json();
-                throw new Error(errorData.error || 'Training data extraction failed');
-            }
-
-            const data = await response.json();
-            return {
-                filename: result.filename,
-                ...data
-            };
-
-        } catch (error) {
-            console.error(`❌ Error extracting training data for ${result.filename}:`, error);
-            throw error;
-        }
-    };
-
     const extractTrainingDataAll = async () => {
         if (files.length === 0) {
             alert('Please process some images first');
@@ -496,60 +460,97 @@ const FileUpload = () => {
         setExtractingTrainingData(true);
         setMessage('🎯 Extracting training data for all images...');
         setTrainingDataResults([]);
+        setBulkTrainingData(null);
 
         try {
-            const extractionResults = [];
-            const validResults = results.filter(r => !r.error);
+            // Use the new bulk extraction endpoint
+            const formData = new FormData();
+            
+            // Only include image files (no videos for training data extraction)
+            const imageFiles = files.filter(f => f.type.startsWith('image/'));
+            
+            if (imageFiles.length === 0) {
+                setMessage('❌ No image files found for training data extraction');
+                return;
+            }
+            
+            // Add all image files to the form data
+            imageFiles.forEach(file => {
+                formData.append('files', file);
+            });
+            
+            // Add confidence threshold
+            formData.append('confidence', confidenceThreshold.toString());
+            
+            setMessage(`🎯 Processing ${imageFiles.length} images for training data extraction...`);
+            
+            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/extract-training-data-bulk', {
+                method: 'POST',
+                body: formData,
+                mode: 'cors'
+            });
 
-            for (let i = 0; i < validResults.length; i++) {
-                const result = validResults[i];
-                setMessage(`🎯 Extracting training data: ${i + 1}/${validResults.length} (${result.filename})`);
-
-                try {
-                    const extractionResult = await extractTrainingDataSingle(null, result);
-                    extractionResults.push(extractionResult);
-                } catch (error) {
-                    extractionResults.push({
-                        filename: result.filename,
-                        error: error.message
-                    });
-                }
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || 'Bulk training data extraction failed');
             }
 
-            setTrainingDataResults(extractionResults);
+            const data = await response.json();
             
-            const successfulExtractions = extractionResults.filter(r => !r.error);
-            const totalSamples = successfulExtractions.reduce((sum, r) => sum + (r.extracted_count || 0), 0);
+            // Set the bulk training data for download
+            setBulkTrainingData({
+                dataset_zip: data.dataset_zip,
+                total_samples: data.extracted_count,
+                files_included: data.files_with_detections,
+                files_without_detections: data.files_without_detections,
+                confidence_threshold: data.confidence_threshold,
+                files_with_detections: data.files_with_detections.length,
+                dataset_size_mb: data.dataset_size_mb
+            });
             
-            setMessage(`✅ Training data extraction complete: ${totalSamples} samples from ${successfulExtractions.length}/${validResults.length} images`);
+            // Create results for display
+            const combinedResults = [{
+                filename: `Combined Dataset (${data.files_with_detections.length} files)`,
+                extracted_count: data.extracted_count,
+                confidence_threshold: data.confidence_threshold,
+                files_included: data.files_with_detections,
+                files_excluded: data.files_without_detections
+            }];
+            setTrainingDataResults(combinedResults);
+            
+            const filesWithDetections = data.files_with_detections.length;
+            const filesWithoutDetections = data.files_without_detections.length;
+            
+            setMessage(`✅ Training data extraction complete: ${data.extracted_count} samples from ${filesWithDetections}/${imageFiles.length} images (${filesWithoutDetections} images had no detections)`);
 
         } catch (error) {
             console.error('❌ Error in bulk training data extraction:', error);
             setMessage(`❌ Training data extraction failed: ${error.message}`);
+            setBulkTrainingData(null);
         } finally {
             setExtractingTrainingData(false);
         }
     };
 
-    const downloadTrainingData = (trainingResult) => {
-        if (!trainingResult?.dataset_zip) {
-            alert('No training data available for download');
+    const downloadBulkTrainingData = () => {
+        if (!bulkTrainingData?.dataset_zip) {
+            alert('No combined training data available for download');
             return;
         }
 
         try {
             const link = document.createElement('a');
-            link.href = trainingResult.dataset_zip;
-            link.download = `training_data_${trainingResult.filename}_${new Date().toISOString().slice(0, 10)}.zip`;
+            link.href = bulkTrainingData.dataset_zip;
+            link.download = `combined_training_data_${bulkTrainingData.files_included.length}files_${bulkTrainingData.total_samples}samples_${new Date().toISOString().slice(0, 10)}.zip`;
             
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
             
-            console.log(`📥 Training dataset download initiated for ${trainingResult.filename}`);
+            console.log(`📥 Combined training dataset download initiated: ${bulkTrainingData.total_samples} samples from ${bulkTrainingData.files_included.length} files`);
         } catch (error) {
-            console.error('❌ Error downloading training data:', error);
-            alert('Failed to download training data');
+            console.error('❌ Error downloading combined training data:', error);
+            alert('Failed to download combined training data');
         }
     };
 
@@ -1161,40 +1162,47 @@ const FileUpload = () => {
 
                             <button 
                                 onClick={extractTrainingDataAll}
-                                disabled={extractingTrainingData || results.filter(r => !r.error).length === 0}
+                                disabled={extractingTrainingData || files.filter(f => f.type.startsWith('image/')).length === 0}
                                 style={{
                                     ...styles.extractButton,
-                                    opacity: (extractingTrainingData || results.filter(r => !r.error).length === 0) ? 0.6 : 1,
-                                    cursor: (extractingTrainingData || results.filter(r => !r.error).length === 0) ? 'not-allowed' : 'pointer'
+                                    opacity: (extractingTrainingData || files.filter(f => f.type.startsWith('image/')).length === 0) ? 0.6 : 1,
+                                    cursor: (extractingTrainingData || files.filter(f => f.type.startsWith('image/')).length === 0) ? 'not-allowed' : 'pointer'
                                 }}
                                 className="extract-button"
                             >
                                 {extractingTrainingData && <span style={styles.loadingSpinner}></span>}
-                                {extractingTrainingData ? 'Extracting Training Data...' : '📦 Extract Training Dataset from All Images'}
+                                {extractingTrainingData ? 'Extracting Training Data...' : `📦 Extract Combined Training Dataset from ${files.filter(f => f.type.startsWith('image/')).length} Images`}
                             </button>
 
                             {trainingDataResults.length > 0 && (
                                 <div style={styles.trainingResult}>
                                     <div style={styles.trainingResultText}>
-                                        ✅ Extraction Complete: {trainingDataResults.filter(r => !r.error).length}/{trainingDataResults.length} successful
+                                        ✅ Extraction Complete: {trainingDataResults.length} files with detections
                                     </div>
                                     <div style={styles.trainingResultText}>
-                                        Total Samples: {trainingDataResults.filter(r => !r.error).reduce((sum, r) => sum + (r.extracted_count || 0), 0)}
+                                        Files included: {bulkTrainingData?.files_included?.join(', ') || 'None'}
+                                    </div>
+                                    <div style={styles.trainingResultText}>
+                                        Total Samples: {bulkTrainingData?.total_samples || 0}
                                     </div>
                                     <div style={styles.trainingResultText}>
                                         Confidence Used: {confidenceThreshold.toFixed(1)}
                                     </div>
+                                    {bulkTrainingData?.files_without_detections > 0 && (
+                                        <div style={{...styles.trainingResultText, color: '#d97706'}}>
+                                            ⚠️ {bulkTrainingData.files_without_detections} files excluded (no detections)
+                                        </div>
+                                    )}
                                     
-                                    {/* Individual download buttons for each successful extraction */}
-                                    {trainingDataResults.filter(r => !r.error).map((result, index) => (
+                                    {/* Single combined download button */}
+                                    {bulkTrainingData && (
                                         <button 
-                                            key={index}
-                                            onClick={() => downloadTrainingData(result)}
-                                            style={{...styles.downloadButton, marginTop: '0.5rem', marginRight: '0.5rem'}}
+                                            onClick={downloadBulkTrainingData}
+                                            style={{...styles.downloadButton, marginTop: '1rem', width: '100%', fontSize: '1rem', padding: '0.75rem'}}
                                         >
-                                            📥 Download {result.filename} ({result.extracted_count} samples)
+                                            📥 Download Combined Training Dataset ({bulkTrainingData.total_samples} samples from {bulkTrainingData.files_included.length} files)
                                         </button>
-                                    ))}
+                                    )}
                                 </div>
                             )}
                         </div>

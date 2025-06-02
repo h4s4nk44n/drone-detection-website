@@ -19,6 +19,7 @@ import shutil
 import uuid
 import time
 import json
+import zipfile
 
 # Load environment variables
 load_dotenv()
@@ -1125,6 +1126,248 @@ def extract_training_data():
         print(f"❌ Error in extract_training_data endpoint: {str(e)}")
         traceback.print_exc()
         return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+@app.route('/api/extract-training-data-bulk', methods=['POST'])
+def extract_training_data_bulk():
+    """Extract YOLO format training data from multiple uploaded files and combine into one dataset"""
+    try:
+        print("🎯 === BULK TRAINING DATA EXTRACTION ENDPOINT REACHED ===")
+        
+        # Cleanup old files first
+        cleanup_old_files()
+        
+        if 'files' not in request.files:
+            print("❌ No files in request")
+            return jsonify({"error": "No files uploaded"}), 400
+        
+        files = request.files.getlist('files')
+        if not files or len(files) == 0:
+            print("❌ Empty files list")
+            return jsonify({"error": "No files selected"}), 400
+        
+        print(f"📁 Files received: {len(files)} files")
+        for file in files:
+            if file.filename:
+                print(f"   - {file.filename}")
+        
+        # Get confidence threshold from request (optional)
+        confidence_threshold = float(request.form.get('confidence', 0.3))
+        if confidence_threshold < 0.1 or confidence_threshold > 0.9:
+            confidence_threshold = 0.3
+        
+        print(f"🎯 Confidence threshold: {confidence_threshold}")
+        
+        # Collect all training data from all files
+        all_training_images = []
+        all_training_labels = []
+        total_extracted_count = 0
+        files_with_detections = []
+        files_without_detections = []
+        
+        for i, file in enumerate(files):
+            if not file.filename:
+                continue
+                
+            try:
+                print(f"🔄 Processing file {i+1}/{len(files)}: {file.filename}")
+                
+                # Read file data
+                file_data = file.read()
+                file_size_mb = len(file_data) / (1024 * 1024)
+                
+                # File size check
+                if file_size_mb > 50:  # Lower limit for bulk processing
+                    print(f"⚠️ Skipping {file.filename}: too large ({file_size_mb:.2f}MB)")
+                    continue
+                
+                # Get file extension
+                file_ext = os.path.splitext(file.filename)[1].lower()
+                
+                # File type validation - only images for bulk training extraction
+                allowed_extensions = {'.jpg', '.jpeg', '.png'}
+                if file_ext not in allowed_extensions:
+                    print(f"⚠️ Skipping {file.filename}: unsupported type {file_ext}")
+                    continue
+                
+                print(f"📊 Processing {file.filename} ({file_size_mb:.2f}MB)")
+                
+                # Process file and extract training data
+                result = process_file_in_memory(
+                    file_data, file_ext, file.filename, model, 
+                    extract_training_data=True, 
+                    confidence_threshold=confidence_threshold
+                )
+                
+                if len(result) == 5:  # With training data
+                    original_base64, processed_base64, mime_type, zip_data, extracted_count = result
+                    
+                    if extracted_count > 0:
+                        print(f"✅ {file.filename}: {extracted_count} samples extracted")
+                        files_with_detections.append(file.filename)
+                        total_extracted_count += extracted_count
+                        
+                        # Extract images and labels from the individual ZIP
+                        # We need to unpack the ZIP and add to our combined collection
+                        
+                        zip_buffer = BytesIO(zip_data)
+                        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
+                            # Read all images and labels from this file's ZIP
+                            for file_info in zip_file.filelist:
+                                if file_info.filename.startswith('images/') and file_info.filename.endswith('.jpg'):
+                                    # Read image data
+                                    image_data = zip_file.read(file_info.filename)
+                                    # Convert to OpenCV format
+                                    nparr = np.frombuffer(image_data, np.uint8)
+                                    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                                    if image is not None:
+                                        all_training_images.append(image)
+                                        
+                                        # Find corresponding label file
+                                        label_filename = file_info.filename.replace('images/', 'labels/').replace('.jpg', '.txt')
+                                        if label_filename in [f.filename for f in zip_file.filelist]:
+                                            label_data = zip_file.read(label_filename).decode('utf-8')
+                                            all_training_labels.append(label_data)
+                                        else:
+                                            all_training_labels.append("")  # Empty label if not found
+                    else:
+                        print(f"⚠️ {file.filename}: No detections found")
+                        files_without_detections.append(file.filename)
+                else:
+                    print(f"⚠️ {file.filename}: No training data returned")
+                    files_without_detections.append(file.filename)
+                    
+            except Exception as file_error:
+                print(f"❌ Error processing {file.filename}: {str(file_error)}")
+                files_without_detections.append(file.filename)
+                continue
+        
+        print(f"📊 Bulk extraction summary:")
+        print(f"   - Total samples: {total_extracted_count}")
+        print(f"   - Files with detections: {len(files_with_detections)}")
+        print(f"   - Files without detections: {len(files_without_detections)}")
+        
+        if total_extracted_count == 0:
+            return jsonify({
+                "error": "No drone detections found in any of the uploaded files.",
+                "debug_info": {
+                    "confidence_threshold_used": confidence_threshold,
+                    "files_processed": len(files),
+                    "files_without_detections": files_without_detections
+                },
+                "suggestions": [
+                    f"Try a lower confidence threshold (current: {confidence_threshold})",
+                    "Ensure the images contain clearly visible drones",
+                    "Check that the drones are not too small in the frames"
+                ]
+            }), 400
+        
+        # Create combined training dataset ZIP
+        combined_zip_data = create_combined_training_dataset_zip(
+            all_training_images, 
+            all_training_labels, 
+            f"bulk_dataset_{len(files_with_detections)}files"
+        )
+        
+        # Convert ZIP to base64 for download
+        zip_base64 = base64.b64encode(combined_zip_data).decode('utf-8')
+        
+        return jsonify({
+            "message": f"Bulk training data extracted successfully: {total_extracted_count} samples from {len(files_with_detections)} files",
+            "extracted_count": total_extracted_count,
+            "files_with_detections": files_with_detections,
+            "files_without_detections": files_without_detections,
+            "confidence_threshold": confidence_threshold,
+            "dataset_zip": f"data:application/zip;base64,{zip_base64}",
+            "dataset_size_mb": round(len(combined_zip_data) / (1024 * 1024), 2)
+        })
+        
+    except Exception as e:
+        print(f"❌ Error in extract_training_data_bulk endpoint: {str(e)}")
+        traceback.print_exc()
+        return jsonify({"error": f"Bulk training data extraction failed: {str(e)}"}), 500
+
+def create_combined_training_dataset_zip(training_images, training_labels, dataset_name):
+    """
+    Create a ZIP file containing combined training images and YOLO format labels from multiple sources
+    """
+    print(f"📦 Creating combined training dataset ZIP with {len(training_images)} samples...")
+    
+    # Create in-memory ZIP file
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        # Create images and labels directories
+        for i, (image, label) in enumerate(zip(training_images, training_labels)):
+            # Create unique filenames for combined dataset
+            image_filename = f"images/{dataset_name}_{i:06d}.jpg"
+            label_filename = f"labels/{dataset_name}_{i:06d}.txt"
+            
+            # Save image
+            _, buffer = cv2.imencode('.jpg', image)
+            zip_file.writestr(image_filename, buffer.tobytes())
+            
+            # Save label
+            zip_file.writestr(label_filename, label)
+        
+        # Create dataset.yaml file for YOLO training
+        dataset_config = {
+            'path': './dataset',
+            'train': 'images',
+            'val': 'images',  # Same as train for this extracted dataset
+            'nc': 1,  # Number of classes (assuming drone detection)
+            'names': ['drone']  # Class names
+        }
+        
+        yaml_content = yaml.dump(dataset_config, default_flow_style=False)
+        zip_file.writestr('dataset.yaml', yaml_content)
+        
+        # Create README file
+        readme_content = f"""# Combined Drone Detection Training Dataset
+
+This dataset was automatically extracted from multiple image files.
+
+## Contents:
+- images/: Combined training images with drone detections ({len(training_images)} files)
+- labels/: Combined YOLO format annotation files ({len(training_labels)} files)
+- dataset.yaml: Dataset configuration for YOLO training
+
+## Dataset Statistics:
+- Total samples: {len(training_images)}
+- Image format: JPG
+- Label format: YOLO (class_id center_x center_y width height - normalized coordinates)
+- Filename pattern: {dataset_name}_XXXXXX.jpg/.txt
+
+## YOLO Format Details:
+Each .txt file contains one line per detection:
+- class_id: 0 (drone)
+- center_x: Normalized x-coordinate of bounding box center (0.0-1.0)
+- center_y: Normalized y-coordinate of bounding box center (0.0-1.0)
+- width: Normalized width of bounding box (0.0-1.0)
+- height: Normalized height of bounding box (0.0-1.0)
+
+## Usage:
+1. Extract this ZIP file
+2. Use with YOLO training frameworks like Ultralytics YOLOv11
+3. Update dataset.yaml paths as needed for your environment
+
+Example training command:
+```bash
+yolo train data=dataset.yaml model=yolo11n.pt epochs=100 imgsz=640
+```
+
+## Classes:
+- 0: drone
+
+Generated by Drone Detection System - Bulk Extraction
+Extracted on: {time.strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        zip_file.writestr('README.md', readme_content)
+    
+    zip_data = zip_buffer.getvalue()
+    zip_buffer.close()
+    
+    print(f"✅ Combined training dataset ZIP created: {len(zip_data) / (1024*1024):.2f}MB")
+    return zip_data
 
 if __name__ == '__main__':
     # Get port from environment (Google Cloud Run sets PORT automatically)
