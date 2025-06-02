@@ -487,37 +487,49 @@ const FileUpload = () => {
     };
 
     const extractTrainingDataAll = async () => {
+        if (files.length === 0) {
+            alert('Please select and process some images first (videos are not used for bulk training data extraction).');
+            return;
+        }
+
         const imageFilesForTraining = files.filter(f => f.type.startsWith('image/'));
+
         if (imageFilesForTraining.length === 0) {
-            alert('No image files selected. Please select images to extract training data.');
-            setMessage('ℹ️ No image files for training data extraction.');
+            setMessage('ℹ️ No image files selected to extract training data from.');
+            alert('No image files selected to extract training data from.');
             return;
         }
 
         setExtractingTrainingData(true);
-        setMessage(`🎯 Extracting training data from ${imageFilesForTraining.length} images...`);
-        setBulkTrainingData(null); 
+        setMessage('🎯 Extracting training data for all images...');
+        setTrainingDataResults([]); // Clear previous individual results
+        setBulkTrainingData(null);  // Clear previous bulk result
         setError('');
 
         try {
             const formData = new FormData();
-            imageFilesForTraining.forEach(file => formData.append('files', file));
+            imageFilesForTraining.forEach(file => {
+                formData.append('files', file);
+            });
             formData.append('confidence', confidenceThreshold.toString());
+
+            setMessage(`🎯 Processing ${imageFilesForTraining.length} images for training data extraction...`);
 
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/extract-training-data-bulk', {
                 method: 'POST',
                 body: formData,
-                mode: 'cors'
+                mode: 'cors' // Ensure CORS is enabled
             });
+
             const responseData = await response.json();
 
             if (!response.ok) {
-                throw new Error(responseData.error || `Training data extraction failed (HTTP ${response.status})`);
+                throw new Error(responseData.error || `Bulk training data extraction failed with status ${response.status}`);
             }
             
             setBulkTrainingData({
                 dataset_zip: responseData.dataset_zip,
-                total_samples: responseData.extracted_count || 0,
+                total_samples: responseData.extracted_count,
                 files_with_detections_list: responseData.files_with_detections || [],
                 files_without_detections_list: responseData.files_without_detections || [],
                 confidence_threshold: responseData.confidence_threshold,
@@ -525,14 +537,15 @@ const FileUpload = () => {
                 dataset_size_mb: responseData.dataset_size_mb
             });
             
-            const includedCount = (responseData.files_with_detections || []).length;
-            const excludedCount = (responseData.files_without_detections || []).length;
-            setMessage(`✅ Training data extracted: ${responseData.extracted_count || 0} samples from ${includedCount} images. ${excludedCount} images had no detections.`);
+            const filesWithDetectionsCount = (responseData.files_with_detections || []).length;
+            const filesWithoutDetectionsCount = (responseData.files_without_detections || []).length;
+            
+            setMessage(`✅ Training data extraction complete: ${responseData.extracted_count} samples from ${filesWithDetectionsCount}/${imageFilesForTraining.length} images. ${filesWithoutDetectionsCount} images had no detections.`);
 
-        } catch (err) { // Changed variable name from error to err
-            console.error('❌ Bulk training data extraction error:', err);
-            setMessage(`❌ Extraction failed: ${err.message}`);
-            setError(`Extraction error: ${err.message}`);
+        } catch (error) {
+            console.error('❌ Error in bulk training data extraction:', error);
+            setMessage(`❌ Training data extraction failed: ${error.message}`);
+            setError(`Training data extraction error: ${error.message}`);
             setBulkTrainingData(null);
         } finally {
             setExtractingTrainingData(false);
@@ -541,21 +554,27 @@ const FileUpload = () => {
 
     const downloadBulkTrainingData = () => {
         if (!bulkTrainingData?.dataset_zip) {
-            alert('No combined training data available. Please extract first.');
+            alert('No combined training data available for download. Please extract it first.');
             return;
         }
+
         try {
             const link = document.createElement('a');
             link.href = bulkTrainingData.dataset_zip;
+            // Sanitize filename components
             const includedCount = bulkTrainingData.files_included_count || 0;
             const samplesCount = bulkTrainingData.total_samples || 0;
-            link.download = `combined_training_data_${includedCount}files_${samplesCount}samples_${new Date().toISOString().slice(0, 10)}.zip`;
+            const dateStr = new Date().toISOString().slice(0, 10);
+            link.download = `combined_training_data_${includedCount}files_${samplesCount}samples_${dateStr}.zip`;
+            
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
-        } catch (err) { // Changed variable name from error to err
-            console.error('❌ Error downloading bulk training data:', err);
-            alert('Download failed. See console.');
+            
+            console.log(`📥 Combined training dataset download initiated: ${samplesCount} samples from ${includedCount} files`);
+        } catch (error) {
+            console.error('❌ Error downloading combined training data:', error);
+            alert('Failed to download combined training data. Check console for details.');
         }
     };
 
@@ -563,11 +582,11 @@ const FileUpload = () => {
     // Ensure startCamera, stopCamera, handleCameraChange are defined as per previous steps
     // Ensure takePhoto, startRecording, stopRecording, formatRecordingTime are defined as per previous steps
     
-    const startCamera = async () => {
+    const startCamera = async (explicitDeviceId = null) => {
         try {
             setCameraError('');
             setIsCameraViewfinderReady(false);
-            console.log('🔄 Starting camera acquisition...');
+            console.log(`🔄 Starting camera acquisition... Explicit device ID requested: ${explicitDeviceId || 'None'}`);
             
             if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
                 throw new Error('Camera access not supported in this browser');
@@ -590,12 +609,13 @@ const FileUpload = () => {
             };
 
             let constraintsToTry = [];
+            const deviceIdToUse = explicitDeviceId || selectedCameraId;
 
-            if (selectedCameraId) {
-                console.log(`📷 Attempting to use specifically selected camera ID: ${selectedCameraId}`);
-                constraintsToTry.push({ video: { deviceId: { exact: selectedCameraId }, ...idealVideoSettings }, audio: true });
-                constraintsToTry.push({ video: { deviceId: { exact: selectedCameraId }, ...idealVideoSettings }, audio: false });
-                constraintsToTry.push({ video: { deviceId: { exact: selectedCameraId } } }); 
+            if (deviceIdToUse) {
+                console.log(`📷 Attempting to use camera ID: ${deviceIdToUse}`);
+                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse }, ...idealVideoSettings }, audio: true });
+                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse }, ...idealVideoSettings }, audio: false });
+                constraintsToTry.push({ video: { deviceId: { exact: deviceIdToUse } } }); 
             } else {
                 console.log('📷 No specific camera selected by user. Trying default facing modes.');
                 constraintsToTry.push({ video: { facingMode: 'environment', ...idealVideoSettings }, audio: true });
@@ -644,26 +664,47 @@ const FileUpload = () => {
                 setAvailableCameras(videoDevices);
                 console.log('📷 Available video devices:', videoDevices.map(d => ({id: d.deviceId, label: d.label, kind: d.kind}) ));
                 
-                if (videoDevices.length > 0) {
-                    const currentVideoTrack = newStream.getVideoTracks()[0];
-                    const currentStreamDeviceId = currentVideoTrack?.getSettings?.().deviceId;
+                // New logic to synchronize selectedCameraId with the actual stream
+                const currentStreamVideoTrack = newStream.getVideoTracks()[0];
+                const actualDeviceIdFromStream = currentStreamVideoTrack?.getSettings?.().deviceId;
 
-                    if (selectedCameraId && videoDevices.some(d => d.deviceId === selectedCameraId)) {
-                        console.log(`📷 Retaining user selected camera: ${selectedCameraId}`);
-                    } else if (currentStreamDeviceId && videoDevices.some(d => d.deviceId === currentStreamDeviceId)) {
-                        console.log(`📹 Defaulting selectedCameraId to current stream\'s device: ${currentStreamDeviceId}`);
-                        setSelectedCameraId(currentStreamDeviceId);
+                console.log(`[CameraSync] User explicitly selected ID before this stream: ${selectedCameraId}, Actual stream's device ID: ${actualDeviceIdFromStream}`);
+
+                if (actualDeviceIdFromStream && videoDevices.some(d => d.deviceId === actualDeviceIdFromStream)) {
+                    // The active stream has a device ID that's in our list of available cameras.
+                    // Set the dropdown to this device ID.
+                    if (selectedCameraId !== actualDeviceIdFromStream) {
+                        console.log(`🔄 [CameraSync] Dropdown was ${selectedCameraId}, now setting to actual stream ID ${actualDeviceIdFromStream} to match active feed.`);
+                        setSelectedCameraId(actualDeviceIdFromStream);
                     } else {
-                        const backCamera = videoDevices.find(d => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
-                        if (backCamera) {
-                            console.log(`📹 Defaulting selectedCameraId to a \'back\' camera: ${backCamera.deviceId} (${backCamera.label})`);
-                            setSelectedCameraId(backCamera.deviceId);
-                        } else if (videoDevices.length > 0) {
-                            console.log(`📹 Defaulting selectedCameraId to first available device: ${videoDevices[0].deviceId} (${videoDevices[0].label})`);
-                            setSelectedCameraId(videoDevices[0].deviceId);
-                        }
+                        console.log(`✅ [CameraSync] Dropdown ${selectedCameraId} already matches actual stream ID ${actualDeviceIdFromStream}.`);
                     }
+                } else if (videoDevices.length > 0) {
+                    // Active stream's device ID is not good, or no stream track.
+                    // If dropdown isn't already set to a valid available camera, pick a default.
+                    // This handles initial load or bad stream device ID cases.
+                    const currentSelectionIsValid = selectedCameraId && videoDevices.some(d => d.deviceId === selectedCameraId);
+                    if (!currentSelectionIsValid) {
+                        console.warn(`⚠️ [CameraSync] Current selection ${selectedCameraId} is invalid OR stream's device ID (${actualDeviceIdFromStream}) is problematic. Defaulting camera selection.`);
+                        // Try to pick a 'back' camera first, then the first device.
+                        const backCamera = videoDevices.find(d => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
+                        const defaultDevice = backCamera || videoDevices[0];
+                        if (defaultDevice) {
+                             console.log(`📹 [CameraSync] Defaulting to ${defaultDevice.label} (${defaultDevice.deviceId})`);
+                             setSelectedCameraId(defaultDevice.deviceId);
+                        } else {
+                             setSelectedCameraId(''); // Should not happen if videoDevices.length > 0
+                        }
+                    } else {
+                         console.log(`ℹ️ [CameraSync] Stream's device ID (${actualDeviceIdFromStream}) problematic, but current selection ${selectedCameraId} is valid. Keeping it for now.`);
+                         // setSelectedCameraId(selectedCameraId); // No change needed
+                    }
+                } else {
+                    // No available video devices found during enumeration.
+                    console.warn('[CameraSync] No available video devices found. Clearing selectedCameraId.');
+                    setSelectedCameraId('');
                 }
+                // End of new logic
             } catch (enumError) { // local enumError
                 console.error('❌ Error enumerating devices:', enumError);
             }
@@ -729,8 +770,8 @@ const FileUpload = () => {
         }
         
         setTimeout(async () => {
-             await startCamera(); 
-        }, 100);
+             await startCamera(newCameraId); 
+        }, 50);
     };
 
     const takePhoto = () => {
