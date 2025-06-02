@@ -275,6 +275,9 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
         temp_input.write(file_data)
         temp_input_path = temp_input.name
     
+    # Save original file data for base64 encoding before deleting for memory management
+    original_file_data = file_data
+    
     # Clear file_data from memory immediately after writing to temp file
     del file_data
     cleanup_memory()
@@ -549,8 +552,11 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                 processed_video_data = f.read()
             
             # Convert to base64
-            original_base64 = base64.b64encode(file_data).decode('utf-8')
+            original_base64 = base64.b64encode(original_file_data).decode('utf-8')
             processed_base64 = base64.b64encode(processed_video_data).decode('utf-8')
+            
+            # Clear original file data from memory after base64 conversion
+            del original_file_data
             
             print(f"✅ Video processing complete:")
             print(f"   - Method: {'OpenCV' if opencv_error is None else 'FFmpeg'}")
