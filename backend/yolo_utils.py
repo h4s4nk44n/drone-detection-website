@@ -12,8 +12,46 @@ import gc
 import yaml
 import re
 import time
+import psutil  # Add psutil for memory monitoring
 
 YOLO_PROCESSING_SIZE = 832  # High accuracy processing for all media
+
+def cleanup_memory():
+    """
+    Force garbage collection and memory cleanup
+    """
+    import gc
+    gc.collect()
+    
+def log_memory_usage(stage=""):
+    """
+    Log current memory usage for monitoring
+    """
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        memory_mb = memory_info.rss / (1024 * 1024)
+        available_memory = psutil.virtual_memory().available / (1024 * 1024)
+        print(f"🧠 Memory {stage}: {memory_mb:.1f}MB used, {available_memory:.1f}MB available")
+        
+        # Warning if memory usage is high
+        if memory_mb > 3000:  # Warning at 3GB usage
+            print(f"⚠️ High memory usage detected: {memory_mb:.1f}MB")
+        
+        return memory_mb
+    except Exception as e:
+        print(f"⚠️ Memory monitoring failed: {e}")
+        return 0
+
+def cleanup_opencv_resources():
+    """
+    Clean up OpenCV resources and destroy windows
+    """
+    try:
+        cv2.destroyAllWindows()
+        gc.collect()
+    except Exception as e:
+        print(f"⚠️ OpenCV cleanup warning: {e}")
 
 def process_file(file_path, model, session_id=None):
     """
@@ -216,8 +254,11 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
     Process file in memory with proper MIME types for web compatibility
     Enhanced with FFmpeg fallback for reliable video processing
     Optionally extract training data with YOLO format labels
+    Now includes memory management for better multi-user support
     """
     print(f"🔄 Processing file in memory: {filename}")
+    log_memory_usage("start")
+    
     if extract_training_data:
         print(f"🎯 Training data extraction enabled with confidence threshold: {confidence_threshold}")
         print(f"🔧 Strategy: model.predict() uses conf=0.1 to capture more detections")
@@ -233,6 +274,11 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
     with tempfile.NamedTemporaryFile(suffix=file_ext, delete=False) as temp_input:
         temp_input.write(file_data)
         temp_input_path = temp_input.name
+    
+    # Clear file_data from memory immediately after writing to temp file
+    del file_data
+    cleanup_memory()
+    log_memory_usage("after temp file creation")
     
     try:
         if file_ext.lower() in ['.mp4', '.avi', '.mov', '.webm']:
@@ -333,16 +379,17 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                                     
                                     # Extract training data for ONNX model if needed
                                     if extract_training_data:
-                                        # Convert ONNX detections to training data format
-                                        # Note: This is a simplified version - may need adjustment based on ONNX output format
-                                        for detection in detections:
-                                            if detection['confidence'] >= confidence_threshold:
-                                                # Use original resolution frame for training data
-                                                original_frame = cv2.resize(frame, (width, height))
-                                                training_images.append(original_frame.copy())
-                                                
-                                                # Create YOLO format label (simplified)
-                                                # Format: class_id center_x center_y width height (normalized)
+                                        # Find all detections that meet confidence threshold
+                                        valid_detections = [d for d in detections if d['confidence'] >= confidence_threshold]
+                                        
+                                        if valid_detections:
+                                            # Use original resolution frame for training data
+                                            original_frame = cv2.resize(frame, (width, height))
+                                            training_images.append(original_frame.copy())
+                                            
+                                            # Create YOLO format labels for ALL detections in this frame
+                                            frame_labels = []
+                                            for detection in valid_detections:
                                                 x1, y1, x2, y2 = detection['bbox']
                                                 center_x = (x1 + x2) / 2 / width
                                                 center_y = (y1 + y2) / 2 / height
@@ -351,8 +398,15 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                                                 
                                                 # Assuming class 0 for drone (adjust based on your model)
                                                 label = f"0 {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
-                                                training_labels.append(label)
-                                                extracted_count += 1
+                                                frame_labels.append(label)
+                                            
+                                            # Join all labels for this frame with newlines
+                                            combined_labels = "\n".join(frame_labels)
+                                            training_labels.append(combined_labels)
+                                            extracted_count += len(valid_detections)  # Count all detections
+                                            
+                                            if frame_count % 100 == 0:  # Log multi-detection frames
+                                                print(f"🎯 ONNX Frame {frame_count}: Extracted {len(valid_detections)} drones for training")
                                 else:
                                     # PyTorch model
                                     if extract_training_data:
@@ -383,22 +437,27 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                                                 original_frame = cv2.resize(frame, (width, height))
                                                 training_images.append(original_frame.copy())
                                                 
-                                                # Take the most confident detection
-                                                best_box = confident_boxes[confident_boxes.conf.argmax()]
-                                                best_conf = float(best_box.conf.cpu().numpy())
-                                                print(f"🎯 Frame {frame_count}: Using detection with confidence {best_conf:.3f} for training")
+                                                # Extract ALL detections that meet confidence threshold
+                                                frame_labels = []
+                                                for box in confident_boxes:
+                                                    conf = float(box.conf.cpu().numpy())
+                                                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                                    img_height, img_width = frame.shape[:2]
+                                                    center_x = (x1 + x2) / 2 / img_width
+                                                    center_y = (y1 + y2) / 2 / img_height
+                                                    bbox_width = (x2 - x1) / img_width
+                                                    bbox_height = (y2 - y1) / img_height
+                                                    class_id = int(box.cls.cpu().numpy())
+                                                    
+                                                    label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                                                    frame_labels.append(label)
                                                 
-                                                # Convert to YOLO format (normalized coordinates)
-                                                x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
-                                                center_x = (x1 + x2) / 2 / width
-                                                center_y = (y1 + y2) / 2 / height
-                                                bbox_width = (x2 - x1) / width
-                                                bbox_height = (y2 - y1) / height
-                                                class_id = int(best_box.cls.cpu().numpy())
+                                                # Join all labels for this frame with newlines
+                                                combined_labels = "\n".join(frame_labels)
+                                                training_labels.append(combined_labels)
+                                                extracted_count += len(confident_boxes)  # Count all detections
                                                 
-                                                label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
-                                                training_labels.append(label)
-                                                extracted_count += 1
+                                                print(f"🎯 Frame {frame_count}: Extracted {len(confident_boxes)} drones for training (confidences: {[f'{float(box.conf.cpu().numpy()):.3f}' for box in confident_boxes]})")
                                             else:
                                                 print(f"⚠️ Frame {frame_count}: All detections below threshold {confidence_threshold}")
                                         else:
@@ -410,30 +469,33 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                                     raise Exception("Frame write failed")
                                 processed_count += 1
                                 
-                                # Progress update
+                                # Progress update with memory monitoring
                                 if processed_count % 50 == 0:
                                     progress = (frame_count / total_frames) * 100
                                     extraction_info = f", extracted: {extracted_count}" if extract_training_data else ""
                                     print(f"📊 OpenCV Progress: {progress:.1f}% ({processed_count}/{total_frames} frames{extraction_info})")
+                                    log_memory_usage(f"frame {processed_count}")
                                     
-                                # Memory cleanup
+                                # Memory cleanup every 100 frames
                                 if processed_count % 100 == 0:
-                                    gc.collect()
+                                    cleanup_memory()
                                     
                             except Exception as frame_error:
                                 print(f"⚠️ Frame {frame_count} processing failed: {str(frame_error)}")
                                 # Write original frame on error
                                 out.write(frame_resized)
                         
-                        # Clear chunk from memory
+                        # Clear chunk from memory and force cleanup
                         frames_chunk.clear()
-                        gc.collect()
+                        del frames_chunk
+                        cleanup_memory()
                 
                 finally:
                     cap.release()
                     out.release()
-                    cv2.destroyAllWindows()
-                    gc.collect()
+                    cleanup_opencv_resources()
+                    cleanup_memory()
+                    log_memory_usage("after OpenCV processing")
                 
                 # Verify OpenCV output
                 if os.path.exists(temp_output_path) and os.path.getsize(temp_output_path) > 1024:
@@ -507,9 +569,19 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                 else:
                     print(f"   - Note: No frames were processed")
             
+            # Clear processed video data from memory after base64 conversion
+            del processed_video_data
+            cleanup_memory()
+            log_memory_usage("after base64 conversion")
+            
             # Return with or without training data
             if extract_training_data and extracted_count > 0:
                 zip_data = create_training_dataset_zip(training_images, training_labels, filename)
+                # Clear training data from memory after ZIP creation
+                training_images.clear()
+                training_labels.clear()
+                cleanup_memory()
+                log_memory_usage("after ZIP creation")
                 return original_base64, processed_base64, 'video/mp4', zip_data, extracted_count
             elif extract_training_data and extracted_count == 0:
                 # Provide better error messages now that both OpenCV and FFmpeg support training data extraction
@@ -517,8 +589,14 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                 print(f"💡 Suggestion: Try lowering confidence threshold to 0.1 or 0.2")
                 if opencv_error is not None:
                     print(f"   - Note: Used FFmpeg fallback due to OpenCV error: {str(opencv_error)[:100]}...")
+                # Clear empty training data from memory
+                training_images.clear()
+                training_labels.clear()
+                cleanup_memory()
                 return original_base64, processed_base64, 'video/mp4'
             else:
+                cleanup_memory()
+                log_memory_usage("final cleanup")
                 return original_base64, processed_base64, 'video/mp4'
             
         else:
@@ -581,23 +659,27 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                         if len(confident_boxes) > 0:
                             training_images.append(image.copy())
                             
-                            # Take the most confident detection
-                            best_box = confident_boxes[confident_boxes.conf.argmax()]
-                            best_conf = float(best_box.conf.cpu().numpy())
-                            print(f"🎯 Image: Using detection with confidence {best_conf:.3f} for training")
+                            # Extract ALL detections that meet confidence threshold
+                            frame_labels = []
+                            for box in confident_boxes:
+                                conf = float(box.conf.cpu().numpy())
+                                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                img_height, img_width = image.shape[:2]
+                                center_x = (x1 + x2) / 2 / img_width
+                                center_y = (y1 + y2) / 2 / img_height
+                                bbox_width = (x2 - x1) / img_width
+                                bbox_height = (y2 - y1) / img_height
+                                class_id = int(box.cls.cpu().numpy())
+                                
+                                label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                                frame_labels.append(label)
                             
-                            # Convert to YOLO format
-                            x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
-                            img_height, img_width = image.shape[:2]
-                            center_x = (x1 + x2) / 2 / img_width
-                            center_y = (y1 + y2) / 2 / img_height
-                            bbox_width = (x2 - x1) / img_width
-                            bbox_height = (y2 - y1) / img_height
-                            class_id = int(best_box.cls.cpu().numpy())
+                            # Join all labels for this frame with newlines
+                            combined_labels = "\n".join(frame_labels)
+                            training_labels.append(combined_labels)
+                            extracted_count += len(confident_boxes)  # Count all detections
                             
-                            label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
-                            training_labels.append(label)
-                            extracted_count += 1
+                            print(f"🎯 Image: Extracted {len(confident_boxes)} drones for training (confidences: {[f'{float(box.conf.cpu().numpy()):.3f}' for box in confident_boxes]})")
                         else:
                             print(f"⚠️ Image: All detections below threshold {confidence_threshold}")
                     else:
@@ -784,7 +866,6 @@ def process_video_in_memory(file_data, model):
         print("🎬 Starting in-memory video processing...")
         
         # Check available memory before starting
-        import psutil
         available_memory = psutil.virtual_memory().available / (1024 * 1024)
         print(f"🧠 Available memory: {available_memory:.1f} MB")
         
@@ -1129,23 +1210,35 @@ def process_video_with_ffmpeg(input_path, output_path, model, extract_training_d
                             
                             # Extract training data for ONNX model if needed
                             if extract_training_data:
-                                for detection in detections:
-                                    if detection['confidence'] >= confidence_threshold:
-                                        # Use original resolution frame for training data
-                                        original_frame = cv2.resize(frame, (width, height))
-                                        training_images.append(original_frame.copy())
-                                        
-                                        # Create YOLO format label
+                                # Convert ONNX detections to training data format
+                                # Find all detections that meet confidence threshold
+                                valid_detections = [d for d in detections if d['confidence'] >= confidence_threshold]
+                                
+                                if valid_detections:
+                                    # Use original resolution frame for training data
+                                    original_frame = cv2.resize(frame, (width, height))
+                                    training_images.append(original_frame.copy())
+                                    
+                                    # Create YOLO format labels for ALL detections in this frame
+                                    frame_labels = []
+                                    for detection in valid_detections:
                                         x1, y1, x2, y2 = detection['bbox']
                                         center_x = (x1 + x2) / 2 / width
                                         center_y = (y1 + y2) / 2 / height
                                         bbox_width = (x2 - x1) / width
                                         bbox_height = (y2 - y1) / height
                                         
+                                        # Assuming class 0 for drone (adjust based on your model)
                                         label = f"0 {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
-                                        training_labels.append(label)
-                                        extracted_count += 1
-                                        break  # One detection per frame
+                                        frame_labels.append(label)
+                                    
+                                    # Join all labels for this frame with newlines
+                                    combined_labels = "\n".join(frame_labels)
+                                    training_labels.append(combined_labels)
+                                    extracted_count += len(valid_detections)  # Count all detections
+                                    
+                                    if frame_count % 100 == 0:  # Log multi-detection frames
+                                        print(f"🎯 ONNX Frame {frame_count}: Extracted {len(valid_detections)} drones for training")
                         else:
                             processed_frame = frame_resized
                     else:
@@ -1155,43 +1248,54 @@ def process_video_with_ffmpeg(input_path, output_path, model, extract_training_d
                             results = model.predict(frame_resized, verbose=False, conf=0.1)
                         else:
                             # For regular processing, use standard conf
-                            results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
+                            results = model.predict(frame_resized, verbose=False, conf=0.3)
                             
                         processed_frame = results[0].plot()
                         
                         # Extract training data for PyTorch model if needed
                         if extract_training_data:
                             boxes = results[0].boxes
-                            if frame_count % 100 == 0:  # Reduced logging frequency
-                                print(f"🔍 FFmpeg Frame {frame_count}: model.predict() with conf=0.1 found {len(boxes) if boxes is not None else 0} detections")
+                            print(f"🔍 Frame {frame_count}: model.predict() with conf=0.1 found {len(boxes) if boxes is not None else 0} detections")
                             
                             if boxes is not None and len(boxes) > 0:
+                                # Show all detection confidences
+                                all_confidences = boxes.conf.cpu().numpy()
+                                print(f"🔍 Frame {frame_count}: Detection confidences: {[f'{conf:.3f}' for conf in all_confidences]}")
+                                
                                 # Filter by user's confidence threshold
                                 confident_boxes = boxes[boxes.conf >= confidence_threshold]
+                                print(f"🔍 Frame {frame_count}: {len(confident_boxes)} detections above user threshold {confidence_threshold}")
                                 
                                 if len(confident_boxes) > 0:
                                     # Use original resolution frame for training data
                                     original_frame = cv2.resize(frame, (width, height))
                                     training_images.append(original_frame.copy())
                                     
-                                    # Take the most confident detection
-                                    best_box = confident_boxes[confident_boxes.conf.argmax()]
-                                    best_conf = float(best_box.conf.cpu().numpy())
+                                    # Extract ALL detections that meet confidence threshold
+                                    frame_labels = []
+                                    for box in confident_boxes:
+                                        conf = float(box.conf.cpu().numpy())
+                                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                                        img_height, img_width = frame.shape[:2]
+                                        center_x = (x1 + x2) / 2 / img_width
+                                        center_y = (y1 + y2) / 2 / img_height
+                                        bbox_width = (x2 - x1) / img_width
+                                        bbox_height = (y2 - y1) / img_height
+                                        class_id = int(box.cls.cpu().numpy())
+                                        
+                                        label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                                        frame_labels.append(label)
                                     
-                                    # Convert to YOLO format (normalized coordinates)
-                                    x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
-                                    center_x = (x1 + x2) / 2 / width
-                                    center_y = (y1 + y2) / 2 / height
-                                    bbox_width = (x2 - x1) / width
-                                    bbox_height = (y2 - y1) / height
-                                    class_id = int(best_box.cls.cpu().numpy())
+                                    # Join all labels for this frame with newlines
+                                    combined_labels = "\n".join(frame_labels)
+                                    training_labels.append(combined_labels)
+                                    extracted_count += len(confident_boxes)  # Count all detections
                                     
-                                    label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
-                                    training_labels.append(label)
-                                    extracted_count += 1
-                                    
-                                    if frame_count % 100 == 0:  # Reduced logging frequency
-                                        print(f"🎯 FFmpeg Frame {frame_count}: Using detection with confidence {best_conf:.3f} for training")
+                                    print(f"🎯 Frame {frame_count}: Extracted {len(confident_boxes)} drones for training (confidences: {[f'{float(box.conf.cpu().numpy()):.3f}' for box in confident_boxes]})")
+                                else:
+                                    print(f"⚠️ Frame {frame_count}: All detections below threshold {confidence_threshold}")
+                            else:
+                                print(f"⚠️ Frame {frame_count}: No detections found by model")
                     
                     frame_to_write = processed_frame
                 except Exception as ai_error:
@@ -1213,6 +1317,10 @@ def process_video_with_ffmpeg(input_path, output_path, model, extract_training_d
         print(f"✅ FFmpeg extracted and processed {saved_frames} frames")
         if extract_training_data:
             print(f"🎯 FFmpeg training data extraction: {extracted_count} samples collected")
+        
+        # Clean up memory after frame processing
+        cleanup_memory()
+        log_memory_usage("after FFmpeg frame processing")
         
         # Use FFmpeg to create video from frames
         if saved_frames == 0:

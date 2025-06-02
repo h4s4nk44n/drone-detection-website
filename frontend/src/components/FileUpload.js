@@ -2,22 +2,23 @@
 import React, { useState, useEffect, useRef } from 'react';
 
 const FileUpload = () => {
-    const [file, setFile] = useState(null);
-    const [originalMedia, setOriginalMedia] = useState('');
-    const [processedMedia, setProcessedMedia] = useState('');
-    const [mediaType, setMediaType] = useState(''); // 'image' or 'video'
+    const [files, setFiles] = useState([]);
+    const [results, setResults] = useState([]); // Array of {original, processed, filename, id}
     const [loading, setLoading] = useState(false);
     const [message, setMessage] = useState('');
     const [serverStatus, setServerStatus] = useState('checking');
-    const [currentSessionId, setCurrentSessionId] = useState(null);
     const fileInputRef = useRef(null);
     const [error, setError] = useState('');
+    const [dragActive, setDragActive] = useState(false);
+    const [processingProgress, setProcessingProgress] = useState(0);
+    const [currentlyProcessing, setCurrentlyProcessing] = useState('');
     
     // Training data extraction state
     const [extractingTrainingData, setExtractingTrainingData] = useState(false);
     const [showTrainingExtraction, setShowTrainingExtraction] = useState(false);
     const [confidenceThreshold, setConfidenceThreshold] = useState(0.3);
-    const [trainingDataResult, setTrainingDataResult] = useState(null);
+    const [trainingDataResults, setTrainingDataResults] = useState([]);
+    const [bulkTrainingData, setBulkTrainingData] = useState(null);
 
     // Test server connection on component mount
     useEffect(() => {
@@ -55,182 +56,170 @@ const FileUpload = () => {
         return () => clearInterval(interval);
     }, []);
 
-    const handleFileChange = (e) => {
-        const selectedFile = e.target.files[0];
-        if (selectedFile) {
-            // Updated file size limit to match backend
-            const maxSizeMB = 75; // Changed from 25 to 75
-            const fileSizeMB = selectedFile.size / (1024 * 1024);
-            
-            if (fileSizeMB > maxSizeMB) {
-                setError(`File too large. Maximum size is ${maxSizeMB}MB.`);
-                setFile(null);
-                return;
-            }
-            
-            setFile(selectedFile);
-            setError('');
-            
-            // Create preview URL
-            const url = URL.createObjectURL(selectedFile);
-            setOriginalMedia(url);
+    const handleDrag = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.type === "dragenter" || e.type === "dragover") {
+            setDragActive(true);
+        } else if (e.type === "dragleave") {
+            setDragActive(false);
         }
     };
 
-    const handleUpload = async () => {
-        if (!file) {
-            alert('Please select a file first');
-            return;
+    const handleDrop = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        setDragActive(false);
+        
+        if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+            handleFileSelection(Array.from(e.dataTransfer.files));
         }
+    };
 
-        console.log('🚀 Starting file upload process...');
+    const handleFileChange = (e) => {
+        if (e.target.files && e.target.files.length > 0) {
+            handleFileSelection(Array.from(e.target.files));
+        }
+    };
 
-        // File validation
+    const handleFileSelection = (selectedFiles) => {
+        // Filter for valid image files
         const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-        const validVideoTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/webm'];
-        const maxSize = 75 * 1024 * 1024; // 75MB
-        const fileSizeMB = file.size / (1024 * 1024);
-
-        if (file.size > maxSize) {
-            alert('File too large! Maximum size is 75MB.');
+        const imageFiles = selectedFiles.filter(file => validImageTypes.includes(file.type));
+        
+        if (imageFiles.length === 0) {
+            setError('Please select valid image files (JPG, PNG, WEBP)');
             return;
         }
 
-        if (!validImageTypes.includes(file.type) && !validVideoTypes.includes(file.type)) {
-            alert('Invalid file type! Please select JPG, PNG, WEBP images or MP4, AVI, MOV, WEBM videos.');
+        if (selectedFiles.length !== imageFiles.length) {
+            setError(`${selectedFiles.length - imageFiles.length} files were skipped (only images are supported)`);
+        }
+
+        // Check total file size
+        const totalSize = imageFiles.reduce((sum, file) => sum + file.size, 0);
+        const totalSizeMB = totalSize / (1024 * 1024);
+        const maxTotalSizeMB = 150; // 150MB total limit for multiple images
+
+        if (totalSizeMB > maxTotalSizeMB) {
+            setError(`Total file size too large (${totalSizeMB.toFixed(1)}MB). Maximum total size is ${maxTotalSizeMB}MB.`);
+            return;
+        }
+
+        // Check individual file sizes
+        const maxIndividualSizeMB = 25;
+        const oversizedFiles = imageFiles.filter(file => file.size / (1024 * 1024) > maxIndividualSizeMB);
+        if (oversizedFiles.length > 0) {
+            setError(`Some files are too large. Maximum individual file size is ${maxIndividualSizeMB}MB.`);
+            return;
+        }
+
+        setFiles(imageFiles);
+        setError('');
+        console.log(`✅ Selected ${imageFiles.length} files (${totalSizeMB.toFixed(1)}MB total)`);
+    };
+
+    const processAllFiles = async () => {
+        if (files.length === 0) {
+            alert('Please select files first');
             return;
         }
 
         setLoading(true);
-        const currentMediaType = file.type.startsWith('video/') ? 'video' : 'image';
-        setMediaType(currentMediaType);
-        
-        // Dynamic message based on file size
-        if (currentMediaType === 'video') {
-            if (fileSizeMB > 50) {
-                setMessage(`🔄 Processing large video (${fileSizeMB.toFixed(1)}MB)... This may take 20-30 minutes. Please be patient and keep this tab open...`);
-            } else if (fileSizeMB > 30) {
-                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 15-20 minutes. Please wait...`);
-            } else if (fileSizeMB > 15) {
-                setMessage(`🔄 Processing video (${fileSizeMB.toFixed(1)}MB)... This may take 8-12 minutes. Please wait...`);
-            } else {
-                setMessage('🔄 Processing video... This may take 3-8 minutes depending on video length. Please wait...');
-            }
-        } else {
-            setMessage(`🔄 Processing ${currentMediaType}...`);
-        }
+        setResults([]);
+        setProcessingProgress(0);
+        setMessage(`🔄 Processing ${files.length} images...`);
 
-        const formData = new FormData();
-        formData.append('file', file);
+        const newResults = [];
 
         try {
-            let response;
-            
-            // Use chunked upload for files > 25MB
-            if (fileSizeMB > 25) {
-                console.log('🔄 Using chunked upload for large file...');
-                const { processResponse, controller } = await uploadLargeFile(file);
-                response = processResponse;
-            } else {
-                console.log('🔄 Using standard upload...');
-                response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-            }
-            
-            console.log('📡 Response received - Status:', response.status);
-            console.log('📡 Response headers:', [...response.headers.entries()]);
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                setCurrentlyProcessing(file.name);
+                setProcessingProgress(((i) / files.length) * 100);
 
-            if (!response.ok) {
-                let errorMessage;
+                console.log(`🔄 Processing file ${i + 1}/${files.length}: ${file.name}`);
+
+                const formData = new FormData();
+                formData.append('file', file);
+
                 try {
-                    const errorData = await response.json();
-                    errorMessage = errorData.error || `HTTP ${response.status}`;
-                } catch {
-                    const errorText = await response.text();
-                    errorMessage = errorText || `HTTP ${response.status}`;
+                    const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (!response.ok) {
+                        let errorMessage;
+                        try {
+                            const errorData = await response.json();
+                            errorMessage = errorData.error || `HTTP ${response.status}`;
+                        } catch {
+                            errorMessage = `HTTP ${response.status}`;
+                        }
+                        throw new Error(errorMessage);
+                    }
+
+                    const data = await response.json();
+                    
+                    // Handle chunked download if needed
+                    let originalUrl, processedUrl;
+                    
+                    if (data.chunked_download) {
+                        console.log(`📥 Downloading chunked result for ${file.name}...`);
+                        originalUrl = await downloadFileInChunks(data.original_file, 'original');
+                        processedUrl = await downloadFileInChunks(data.processed_file, 'processed');
+                    } else {
+                        originalUrl = data.original_file || data.original;
+                        processedUrl = data.output_file || data.processed;
+                    }
+
+                    newResults.push({
+                        id: Date.now() + i,
+                        filename: file.name,
+                        original: originalUrl,
+                        processed: processedUrl,
+                        fileSize: (file.size / (1024 * 1024)).toFixed(2)
+                    });
+
+                    setResults([...newResults]);
+                    console.log(`✅ Completed ${file.name}`);
+
+                } catch (fileError) {
+                    console.error(`❌ Error processing ${file.name}:`, fileError);
+                    newResults.push({
+                        id: Date.now() + i,
+                        filename: file.name,
+                        error: fileError.message,
+                        fileSize: (file.size / (1024 * 1024)).toFixed(2)
+                    });
+                    setResults([...newResults]);
                 }
-                throw new Error(errorMessage);
             }
 
-            const data = await response.json();
-            console.log('✅ File processing completed successfully');
-            console.log('📊 Response data:', data);
-            
-            // Handle chunked download response
-            if (data.chunked_download) {
-                console.log('🔄 Processing chunked download response...');
-                setMessage('📥 Downloading processed results...');
-                
-                // Download original file in chunks
-                const originalUrl = await downloadFileInChunks(data.original_file, 'original');
-                
-                // Download processed file in chunks  
-                const processedUrl = await downloadFileInChunks(data.processed_file, 'processed');
-                
-                setOriginalMedia(originalUrl);
-                setProcessedMedia(processedUrl);
-                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb}MB) - Downloaded via chunked transfer`);
-                
-            } else {
-                // Handle regular response (for smaller files)
-                setOriginalMedia(data.original_file || data.original);
-                setProcessedMedia(data.output_file || data.processed);
-                setMessage(`✅ ${data.message} (File size: ${data.file_size_mb || fileSizeMB.toFixed(1)}MB)`);
-            }
-            
+            setProcessingProgress(100);
+            setMessage(`✅ Completed processing ${files.length} images. ${newResults.filter(r => !r.error).length} successful, ${newResults.filter(r => r.error).length} failed.`);
+
         } catch (error) {
-            console.error('❌ File upload failed:', error);
-            console.error('❌ Error details:', {
-                name: error.name,
-                message: error.message,
-                stack: error.stack
-            });
-            
-            // Enhanced error handling for different scenarios
-            if (error.name === 'AbortError') {
-                setMessage(`❌ Request timed out. Large files (${fileSizeMB.toFixed(1)}MB) need more time. Please try with a smaller file or check your connection.`);
-            } else if (error.message.includes('NetworkError') || error.message.includes('fetch')) {
-                setMessage('❌ Network error. Please check your internet connection and try again.');
-            } else if (error.message.includes('CORS')) {
-                setMessage('❌ Server configuration error (CORS). Please contact support.');
-            } else if (error.message.includes('too large for response') || error.message.includes('Cloud Run limit')) {
-                setMessage(`❌ ${error.message} The video was processed but the result is too large to display. Try with a shorter video (under 20MB).`);
-            } else if (error.message.includes('File too large for processing')) {
-                setMessage(`❌ ${error.message} Please compress your video or try with a shorter clip.`);
-            } else if (error.message.includes('413')) {
-                setMessage('❌ File or response too large. Please try with a smaller file (under 20MB for videos).');
-            } else if (error.message.includes('Failed to download chunk')) {
-                setMessage(`❌ Download failed: ${error.message}. The video was processed but couldn't be downloaded. Please try again.`);
-            } else {
-                setMessage(`❌ Error: ${error.message}`);
-            }
+            console.error('❌ Batch processing failed:', error);
+            setMessage(`❌ Batch processing failed: ${error.message}`);
         } finally {
             setLoading(false);
+            setCurrentlyProcessing('');
         }
     };
 
     const downloadFileInChunks = async (fileInfo, fileType) => {
-        const chunks = []; // Declare chunks outside try block to avoid scope issues
+        const chunks = [];
         
         try {
             console.log(`📥 Starting chunked download: ${fileInfo.chunks} chunks (${(fileInfo.size / (1024*1024)).toFixed(2)}MB)`);
-            console.log(`📋 File info:`, fileInfo);
-            setMessage(`📥 Downloading ${fileType} result in ${fileInfo.chunks} chunks...`);
             
-            // Add a small delay to give server time to prepare files after processing
-            console.log(`⏳ Waiting 2 seconds for server to prepare files...`);
             await new Promise(resolve => setTimeout(resolve, 2000));
             
-            // Download all chunks with retry logic
             for (let i = 0; i < fileInfo.chunks; i++) {
-                setMessage(`📥 Downloading ${fileType} chunk ${i + 1}/${fileInfo.chunks}...`);
-                
                 const chunkUrl = `https://drone-detection-686868741947.europe-west1.run.app/api/download-chunk/${fileInfo.file_id}/${i}`;
-                console.log(`📡 Requesting chunk ${i + 1} from: ${chunkUrl}`);
                 
-                // Retry logic for each chunk
                 let retryCount = 0;
                 const maxRetries = 3;
                 let chunkSuccess = false;
@@ -238,10 +227,7 @@ const FileUpload = () => {
                 while (!chunkSuccess && retryCount < maxRetries) {
                     try {
                         if (retryCount > 0) {
-                            console.log(`🔄 Retry ${retryCount}/${maxRetries} for chunk ${i + 1}`);
-                            setMessage(`📥 Retrying ${fileType} chunk ${i + 1}/${fileInfo.chunks} (attempt ${retryCount + 1})...`);
-                            // Exponential backoff: wait longer for each retry
-                            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount - 1), 8000); // Max 8 seconds
+                            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount - 1), 8000);
                             await new Promise(resolve => setTimeout(resolve, backoffDelay));
                         }
                         
@@ -254,94 +240,46 @@ const FileUpload = () => {
                             }
                         });
                         
-                        console.log(`📡 Chunk ${i + 1} response status:`, response.status);
-                        
                         if (!response.ok) {
-                            // Try to get error details
                             let errorMessage;
                             try {
                                 const errorData = await response.json();
                                 errorMessage = errorData.error || `HTTP ${response.status}`;
-                                // Only log error details on first attempt to reduce spam
-                                if (retryCount === 0) {
-                                    console.error(`❌ Chunk ${i + 1} error data:`, errorData);
-                                }
                             } catch (parseError) {
-                                if (retryCount === 0) {
-                                    console.error(`❌ Failed to parse chunk ${i + 1} error:`, parseError);
-                                }
                                 const errorText = await response.text();
                                 errorMessage = errorText || `HTTP ${response.status}`;
-                                if (retryCount === 0) {
-                                    console.error(`❌ Chunk ${i + 1} error text:`, errorText);
-                                }
                             }
                             throw new Error(`Failed to download chunk ${i + 1}: ${errorMessage}`);
                         }
                         
                         const chunkData = await response.json();
-                        console.log(`📦 Chunk ${i + 1} data received:`, {
-                            chunk_index: chunkData.chunk_index,
-                            total_chunks: chunkData.total_chunks,
-                            chunk_size: chunkData.chunk_size,
-                            data_length: chunkData.chunk_data ? chunkData.chunk_data.length : 0
-                        });
                         
                         if (!chunkData.chunk_data) {
                             throw new Error(`Chunk ${i + 1} has no data`);
                         }
                         
-                        // Convert base64 back to binary
-                        try {
-                            const binaryString = atob(chunkData.chunk_data);
-                            const bytes = new Uint8Array(binaryString.length);
-                            for (let j = 0; j < binaryString.length; j++) {
-                                bytes[j] = binaryString.charCodeAt(j);
-                            }
-                            
-                            chunks.push(bytes);
-                            console.log(`📦 Successfully processed chunk ${i + 1}: ${bytes.length} bytes`);
-                            chunkSuccess = true; // Mark as successful
-                            
-                        } catch (decodeError) {
-                            console.error(`❌ Failed to decode chunk ${i + 1}:`, decodeError);
-                            throw new Error(`Failed to decode chunk ${i + 1}: ${decodeError.message}`);
+                        const binaryString = atob(chunkData.chunk_data);
+                        const bytes = new Uint8Array(binaryString.length);
+                        for (let j = 0; j < binaryString.length; j++) {
+                            bytes[j] = binaryString.charCodeAt(j);
                         }
+                        
+                        chunks.push(bytes);
+                        chunkSuccess = true;
                         
                     } catch (fetchError) {
                         retryCount++;
-                        // Only log detailed error info on first attempt to reduce spam
-                        if (retryCount === 1) {
-                            console.error(`❌ Network error for chunk ${i + 1} (attempt ${retryCount}):`, fetchError);
-                        } else {
-                            console.log(`🔄 Retry ${retryCount} failed for chunk ${i + 1}: ${fetchError.message}`);
-                        }
-                        
                         if (retryCount >= maxRetries) {
-                            // Check if it's a CORS error
-                            if (fetchError.message.includes('CORS') || fetchError.message.includes('NetworkError')) {
-                                throw new Error(`CORS/Network error on chunk ${i + 1} after ${maxRetries} attempts. Server may not be responding properly.`);
-                            }
-                            
                             throw new Error(`Failed to download chunk ${i + 1} after ${maxRetries} attempts: ${fetchError.message}`);
-                        }
-                        
-                        // Only log retry messages occasionally to reduce spam
-                        if (retryCount <= 2) {
-                            const backoffDelay = Math.min(1000 * Math.pow(2, retryCount - 1), 8000);
-                            console.log(`⏳ Will retry chunk ${i + 1} in ${backoffDelay / 1000} seconds...`);
                         }
                     }
                 }
                 
-                // Add longer delay between chunks to avoid overwhelming the server
                 if (i < fileInfo.chunks - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 300)); // Increased from 100ms to 300ms
+                    await new Promise(resolve => setTimeout(resolve, 300));
                 }
             }
             
-            // Combine all chunks
-            console.log('🔧 Assembling chunks...');
             const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
             const combined = new Uint8Array(totalSize);
             
@@ -351,30 +289,19 @@ const FileUpload = () => {
                 offset += chunk.length;
             }
             
-            // Create blob and object URL
             const blob = new Blob([combined], { type: fileInfo.mime_type });
             const objectUrl = URL.createObjectURL(blob);
-            
-            console.log(`✅ ${fileType} file assembled: ${(totalSize / (1024*1024)).toFixed(2)}MB`);
             
             // Cleanup server file
             try {
                 const cleanupUrl = `https://drone-detection-686868741947.europe-west1.run.app/api/cleanup-download/${fileInfo.file_id}`;
-                console.log(`🧹 Cleaning up server file: ${cleanupUrl}`);
-                
-                const cleanupResponse = await fetch(cleanupUrl, {
+                await fetch(cleanupUrl, {
                     method: 'POST',
                     mode: 'cors',
                     headers: {
                         'Content-Type': 'application/json'
                     }
                 });
-                
-                if (cleanupResponse.ok) {
-                    console.log(`🧹 Cleaned up server file: ${fileInfo.file_id}`);
-                } else {
-                    console.warn(`⚠️ Cleanup failed for ${fileInfo.file_id}:`, cleanupResponse.status);
-                }
             } catch (cleanupError) {
                 console.warn('⚠️ Failed to cleanup server file:', cleanupError);
             }
@@ -383,86 +310,50 @@ const FileUpload = () => {
             
         } catch (error) {
             console.error(`❌ Chunked download failed for ${fileType}:`, error);
-            
-            // Add debug info
-            console.log('🔍 Debug info for failed download:');
-            console.log('   - File info:', fileInfo);
-            console.log('   - Chunks downloaded:', chunks?.length || 0);
-            console.log('   - Error details:', {
-                name: error.name,
-                message: error.message,
-                stack: error.stack
-            });
-            
             throw error;
         }
     };
 
-    const uploadLargeFile = async (file) => {
-        const CHUNK_SIZE = 25 * 1024 * 1024; // 25MB chunks
-        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-        
-        console.log(`📦 Splitting ${(file.size / (1024 * 1024)).toFixed(1)}MB file into ${totalChunks} chunks`);
-        
-        const uploadId = Date.now().toString();
-        
-        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
-            const start = chunkIndex * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, file.size);
-            const chunk = file.slice(start, end);
-            
-            const chunkFormData = new FormData();
-            chunkFormData.append('chunk', chunk);
-            chunkFormData.append('chunkIndex', chunkIndex.toString());
-            chunkFormData.append('totalChunks', totalChunks.toString());
-            chunkFormData.append('uploadId', uploadId);
-            chunkFormData.append('fileName', file.name);
-            
-            console.log(`🔄 Uploading chunk ${chunkIndex + 1}/${totalChunks}`);
-            setMessage(`🔄 Uploading chunk ${chunkIndex + 1}/${totalChunks}...`);
-            
-            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload-chunk', {
-                method: 'POST',
-                body: chunkFormData
-            });
-            
-            if (!response.ok) {
-                throw new Error(`Chunk ${chunkIndex + 1} upload failed`);
-            }
+    const downloadSingleImage = (imageUrl, filename, type) => {
+        try {
+            const link = document.createElement('a');
+            link.href = imageUrl;
+            link.download = `${type}_${filename}`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        } catch (error) {
+            alert('Download failed');
         }
-        
-        // Process the complete file
-        console.log('📋 Processing complete file...');
-        setMessage('🤖 Processing complete video... This may take several minutes...');
-        
-        const controller = new AbortController();
-        const processResponse = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/process-uploaded', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ uploadId, fileName: file.name }),
-            signal: controller.signal
-        });
-        
-        return { processResponse, controller };
     };
 
-    const handleTrainingDataExtraction = async () => {
-        if (!file) {
-            alert('Please select a file first');
+    const downloadAllImages = (type) => {
+        const validResults = results.filter(r => !r.error);
+        if (validResults.length === 0) {
+            alert('No processed images to download');
             return;
         }
 
-        setExtractingTrainingData(true);
-        setMessage('🎯 Extracting training data...');
-        setError('');
-        setTrainingDataResult(null);
+        validResults.forEach((result, index) => {
+            setTimeout(() => {
+                const imageUrl = type === 'original' ? result.original : result.processed;
+                downloadSingleImage(imageUrl, result.filename, type);
+            }, index * 200); // Stagger downloads
+        });
+    };
 
+    const extractTrainingDataSingle = async (file, result) => {
         try {
             const formData = new FormData();
-            formData.append('file', file);
-            formData.append('confidence', confidenceThreshold.toString());
+            // We need to recreate the file from the result, or process the original file
+            // For simplicity, let's process the original file again
+            const originalFile = files.find(f => f.name === result.filename);
+            if (!originalFile) {
+                throw new Error('Original file not found');
+            }
 
-            console.log(`🎯 Starting training data extraction with confidence ${confidenceThreshold}`);
+            formData.append('file', originalFile);
+            formData.append('confidence', confidenceThreshold.toString());
 
             const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/extract-training-data', {
                 method: 'POST',
@@ -470,83 +361,98 @@ const FileUpload = () => {
                 mode: 'cors'
             });
 
-            console.log('📡 Training extraction response status:', response.status);
-
             if (!response.ok) {
                 const errorData = await response.json();
-                console.error('❌ Training extraction error:', errorData);
-                throw new Error(errorData.error || errorData.message || 'Training data extraction failed');
+                throw new Error(errorData.error || 'Training data extraction failed');
             }
 
-            const result = await response.json();
-            console.log('✅ Training extraction successful:', result);
-
-            setTrainingDataResult(result);
-            setMessage(`✅ Training data extracted: ${result.extracted_count} samples (${result.dataset_size_mb}MB)`);
+            const data = await response.json();
+            return {
+                filename: result.filename,
+                ...data
+            };
 
         } catch (error) {
-            console.error('❌ Error extracting training data:', error);
-            setError(error.message || 'Failed to extract training data. Please try again.');
-            setMessage('');
+            console.error(`❌ Error extracting training data for ${result.filename}:`, error);
+            throw error;
+        }
+    };
+
+    const extractTrainingDataAll = async () => {
+        if (files.length === 0) {
+            alert('Please process some images first');
+            return;
+        }
+
+        setExtractingTrainingData(true);
+        setMessage('🎯 Extracting training data for all images...');
+        setTrainingDataResults([]);
+
+        try {
+            const extractionResults = [];
+            const validResults = results.filter(r => !r.error);
+
+            for (let i = 0; i < validResults.length; i++) {
+                const result = validResults[i];
+                setMessage(`🎯 Extracting training data: ${i + 1}/${validResults.length} (${result.filename})`);
+
+                try {
+                    const extractionResult = await extractTrainingDataSingle(null, result);
+                    extractionResults.push(extractionResult);
+                } catch (error) {
+                    extractionResults.push({
+                        filename: result.filename,
+                        error: error.message
+                    });
+                }
+            }
+
+            setTrainingDataResults(extractionResults);
+            
+            const successfulExtractions = extractionResults.filter(r => !r.error);
+            const totalSamples = successfulExtractions.reduce((sum, r) => sum + (r.extracted_count || 0), 0);
+            
+            setMessage(`✅ Training data extraction complete: ${totalSamples} samples from ${successfulExtractions.length}/${validResults.length} images`);
+
+        } catch (error) {
+            console.error('❌ Error in bulk training data extraction:', error);
+            setMessage(`❌ Training data extraction failed: ${error.message}`);
         } finally {
             setExtractingTrainingData(false);
         }
     };
 
-    const downloadTrainingData = () => {
-        if (!trainingDataResult?.dataset_zip) {
+    const downloadTrainingData = (trainingResult) => {
+        if (!trainingResult?.dataset_zip) {
             alert('No training data available for download');
             return;
         }
 
         try {
-            // Create download link
             const link = document.createElement('a');
-            link.href = trainingDataResult.dataset_zip;
-            link.download = `drone_training_dataset_${new Date().toISOString().slice(0, 10)}.zip`;
+            link.href = trainingResult.dataset_zip;
+            link.download = `training_data_${trainingResult.filename}_${new Date().toISOString().slice(0, 10)}.zip`;
             
-            // Trigger download
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
             
-            console.log('📥 Training dataset download initiated');
+            console.log(`📥 Training dataset download initiated for ${trainingResult.filename}`);
         } catch (error) {
             console.error('❌ Error downloading training data:', error);
             alert('Failed to download training data');
         }
     };
 
-    const handleCleanup = async () => {
-        if (!currentSessionId) return;
-        
-        try {
-            const response = await fetch(`https://drone-detection-686868741947.europe-west1.run.app/api/cleanup/${currentSessionId}`, {
-                method: 'POST'
-            });
-            
-            if (response.ok) {
-                console.log('✅ Manual cleanup completed');
-                setCurrentSessionId(null);
-                setOriginalMedia(null);
-                setProcessedMedia(null);
-                setMessage('Files cleaned up successfully');
-            }
-        } catch (error) {
-            console.error('❌ Cleanup failed:', error);
-        }
-    };
-
-    const downloadMedia = (base64Data, filename) => {
-        try {
-            const link = document.createElement('a');
-            link.href = base64Data;
-            link.download = filename;
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        } catch (error) {
-            alert('Download failed');
+    const clearAll = () => {
+        setFiles([]);
+        setResults([]);
+        setTrainingDataResults([]);
+        setBulkTrainingData(null);
+        setMessage('');
+        setError('');
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
         }
     };
 
@@ -617,13 +523,13 @@ const FileUpload = () => {
             marginBottom: '3rem'
         },
         uploadArea: {
-            border: '2px dashed #cbd5e0',
+            border: dragActive ? '2px dashed #2563eb' : '2px dashed #cbd5e0',
             borderRadius: '8px',
             padding: '3rem 2rem',
             textAlign: 'center',
             cursor: 'pointer',
             transition: 'all 0.2s ease',
-            backgroundColor: '#fafafa',
+            backgroundColor: dragActive ? '#f0f9ff' : '#fafafa',
             marginBottom: '1.5rem',
             display: 'block',
             width: '100%',
@@ -652,7 +558,8 @@ const FileUpload = () => {
             marginBottom: '1.5rem',
             fontSize: '0.875rem',
             fontWeight: '500',
-            textAlign: 'center'
+            textAlign: 'center',
+            wordBreak: 'break-word'
         },
         uploadButton: {
             backgroundColor: '#2563eb',
@@ -668,6 +575,58 @@ const FileUpload = () => {
             justifyContent: 'center',
             gap: '0.5rem',
             width: '100%',
+            transition: 'all 0.2s ease'
+        },
+        progressContainer: {
+            margin: '1rem 0'
+        },
+        progressBar: {
+            width: '100%',
+            height: '8px',
+            backgroundColor: '#e2e8f0',
+            borderRadius: '4px',
+            overflow: 'hidden',
+            marginBottom: '0.5rem'
+        },
+        progressFill: {
+            height: '100%',
+            backgroundColor: '#2563eb',
+            transition: 'width 0.3s ease',
+            width: `${processingProgress}%`
+        },
+        progressText: {
+            fontSize: '0.875rem',
+            color: '#6b7280',
+            textAlign: 'center'
+        },
+        bulkControls: {
+            display: 'flex',
+            gap: '1rem',
+            marginTop: '1rem',
+            flexWrap: 'wrap'
+        },
+        bulkButton: {
+            backgroundColor: '#059669',
+            color: '#ffffff',
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            padding: '0.5rem 1rem',
+            borderRadius: '6px',
+            border: 'none',
+            cursor: 'pointer',
+            transition: 'all 0.2s ease',
+            flex: 1,
+            minWidth: '120px'
+        },
+        clearButton: {
+            backgroundColor: '#dc2626',
+            color: '#ffffff',
+            fontSize: '0.875rem',
+            fontWeight: '600',
+            padding: '0.5rem 1rem',
+            borderRadius: '6px',
+            border: 'none',
+            cursor: 'pointer',
             transition: 'all 0.2s ease'
         },
         loadingSpinner: {
@@ -696,7 +655,7 @@ const FileUpload = () => {
         },
         resultsGrid: {
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(300px, 1fr))',
             gap: '2rem'
         },
         imageCard: {
@@ -708,16 +667,21 @@ const FileUpload = () => {
             transition: 'all 0.2s ease'
         },
         imageTitle: {
-            fontSize: '1.25rem',
+            fontSize: '1rem',
             fontWeight: '600',
             color: '#1e293b',
-            marginBottom: '1rem'
+            marginBottom: '1rem',
+            wordBreak: 'break-word'
         },
         mediaContainer: {
-            marginBottom: '1rem'
+            marginBottom: '1rem',
+            display: 'flex',
+            flexDirection: 'row',
+            gap: '0.5rem'
         },
         media: {
             width: '100%',
+            maxWidth: '150px',
             height: 'auto',
             borderRadius: '8px',
             transition: 'all 0.2s ease'
@@ -733,6 +697,11 @@ const FileUpload = () => {
             cursor: 'pointer',
             transition: 'all 0.2s ease',
             width: '100%'
+        },
+        errorMessage: {
+            color: '#dc2626',
+            fontSize: '0.875rem',
+            fontStyle: 'italic'
         },
         // Training data extraction styles
         trainingSection: {
@@ -862,6 +831,16 @@ const FileUpload = () => {
                         transform: translateY(-1px);
                     }
                     
+                    .bulk-button:hover {
+                        background-color: #047857;
+                        transform: translateY(-1px);
+                    }
+                    
+                    .clear-button:hover {
+                        background-color: #b91c1c;
+                        transform: translateY(-1px);
+                    }
+                    
                     .media:hover {
                         transform: scale(1.02);
                     }
@@ -943,7 +922,7 @@ const FileUpload = () => {
                         AI-Powered Drone Detection
                     </h1>
                     <p style={styles.subtitle}>
-                        Upload an image or video and let our advanced machine learning model detect and highlight drones with precision and accuracy.
+                        Upload multiple images and let our advanced machine learning model detect and highlight drones with precision and accuracy.
                     </p>
                 </div>
 
@@ -954,7 +933,8 @@ const FileUpload = () => {
                             type="file"
                             ref={fileInputRef}
                             onChange={handleFileChange}
-                            accept="image/*,video/*"
+                            accept="image/*"
+                            multiple
                             style={styles.fileInput}
                             id="file-upload"
                         />
@@ -962,30 +942,72 @@ const FileUpload = () => {
                             htmlFor="file-upload" 
                             style={styles.uploadArea}
                             className="upload-area"
+                            onDragEnter={handleDrag}
+                            onDragLeave={handleDrag}
+                            onDragOver={handleDrag}
+                            onDrop={handleDrop}
                         >
                             <span style={styles.uploadText}>
-                                📁 Choose File
+                                {dragActive ? '📁 Drop files here!' : '📁 Choose Images or Drag & Drop'}
                             </span>
                             <span style={styles.uploadSubtext}>
-                                Drag and drop or click to select (JPG, PNG, WEBP, MP4)
+                                Select multiple images (JPG, PNG, WEBP) - Max 150MB total
                             </span>
                         </label>
                         
-                        {file && (
+                        {files.length > 0 && (
                             <div style={styles.fileName}>
-                                Selected: {file.name} ({(file.size / (1024*1024)).toFixed(2)} MB)
+                                Selected {files.length} files: {files.map(f => `${f.name} (${(f.size / (1024*1024)).toFixed(1)}MB)`).join(', ')}
+                            </div>
+                        )}
+
+                        {loading && (
+                            <div style={styles.progressContainer}>
+                                <div style={styles.progressBar}>
+                                    <div style={styles.progressFill}></div>
+                                </div>
+                                <div style={styles.progressText}>
+                                    Processing {currentlyProcessing}... ({Math.round(processingProgress)}%)
+                                </div>
                             </div>
                         )}
                         
                         <button 
-                            onClick={handleUpload}
-                            disabled={loading || (!file)}
+                            onClick={processAllFiles}
+                            disabled={loading || files.length === 0}
                             style={styles.uploadButton}
                             className="upload-button"
                         >
                             {loading && <span style={styles.loadingSpinner}></span>}
-                            {loading ? `Processing ${mediaType}...` : '📤 Analyze File'}
+                            {loading ? `Processing ${files.length} images...` : `📤 Analyze ${files.length} Files`}
                         </button>
+
+                        {/* Bulk Controls */}
+                        {results.length > 0 && (
+                            <div style={styles.bulkControls}>
+                                <button 
+                                    onClick={() => downloadAllImages('original')}
+                                    style={styles.bulkButton}
+                                    className="bulk-button"
+                                >
+                                    📥 Download All Originals
+                                </button>
+                                <button 
+                                    onClick={() => downloadAllImages('processed')}
+                                    style={styles.bulkButton}
+                                    className="bulk-button"
+                                >
+                                    📥 Download All Processed
+                                </button>
+                                <button 
+                                    onClick={clearAll}
+                                    style={styles.clearButton}
+                                    className="clear-button"
+                                >
+                                    🗑️ Clear All
+                                </button>
+                            </div>
+                        )}
                     </div>
                 </div>
 
@@ -1005,8 +1027,9 @@ const FileUpload = () => {
                                 🎯 Extract Training Dataset
                             </h3>
                             <p style={styles.trainingDescription}>
-                                Generate a YOLO format training dataset from your uploaded file. This will extract frames with 
+                                Generate YOLO format training datasets from your uploaded images. This will extract frames with 
                                 drone detections and create properly formatted annotation files for training your own models.
+                                Works with multiple images to create a comprehensive dataset.
                             </p>
 
                             <div style={styles.sliderContainer}>
@@ -1028,41 +1051,57 @@ const FileUpload = () => {
                             </div>
 
                             <button 
-                                onClick={handleTrainingDataExtraction}
-                                disabled={extractingTrainingData || !file}
+                                onClick={extractTrainingDataAll}
+                                disabled={extractingTrainingData || results.filter(r => !r.error).length === 0}
                                 style={{
                                     ...styles.extractButton,
-                                    opacity: (extractingTrainingData || !file) ? 0.6 : 1,
-                                    cursor: (extractingTrainingData || !file) ? 'not-allowed' : 'pointer'
+                                    opacity: (extractingTrainingData || results.filter(r => !r.error).length === 0) ? 0.6 : 1,
+                                    cursor: (extractingTrainingData || results.filter(r => !r.error).length === 0) ? 'not-allowed' : 'pointer'
                                 }}
                                 className="extract-button"
                             >
                                 {extractingTrainingData && <span style={styles.loadingSpinner}></span>}
-                                {extractingTrainingData ? 'Extracting Training Data...' : '📦 Extract Training Dataset'}
+                                {extractingTrainingData ? 'Extracting Training Data...' : '📦 Extract Training Dataset from All Images'}
                             </button>
 
-                            {trainingDataResult && (
+                            {trainingDataResults.length > 0 && (
                                 <div style={styles.trainingResult}>
                                     <div style={styles.trainingResultText}>
-                                        ✅ Extraction Complete: {trainingDataResult.extracted_count} samples
+                                        ✅ Extraction Complete: {trainingDataResults.filter(r => !r.error).length}/{trainingDataResults.length} successful
                                     </div>
                                     <div style={styles.trainingResultText}>
-                                        Dataset Size: {trainingDataResult.dataset_size_mb}MB
+                                        Total Samples: {trainingDataResults.filter(r => !r.error).reduce((sum, r) => sum + (r.extracted_count || 0), 0)}
                                     </div>
                                     <div style={styles.trainingResultText}>
-                                        Confidence Used: {trainingDataResult.confidence_threshold}
+                                        Confidence Used: {confidenceThreshold.toFixed(1)}
                                     </div>
-                                    <button 
-                                        onClick={downloadTrainingData}
-                                        style={styles.downloadButton}
-                                    >
-                                        📥 Download Training Dataset
-                                    </button>
+                                    
+                                    {/* Individual download buttons for each successful extraction */}
+                                    {trainingDataResults.filter(r => !r.error).map((result, index) => (
+                                        <button 
+                                            key={index}
+                                            onClick={() => downloadTrainingData(result)}
+                                            style={{...styles.downloadButton, marginTop: '0.5rem', marginRight: '0.5rem'}}
+                                        >
+                                            📥 Download {result.filename} ({result.extracted_count} samples)
+                                        </button>
+                                    ))}
                                 </div>
                             )}
                         </div>
                     )}
                 </div>
+
+                {/* Error Display */}
+                {error && (
+                    <div style={{
+                        ...styles.message,
+                        backgroundColor: '#fee2e2',
+                        color: '#dc2626'
+                    }}>
+                        {error}
+                    </div>
+                )}
 
                 {/* Message */}
                 {message && (
@@ -1076,72 +1115,67 @@ const FileUpload = () => {
                 )}
 
                 {/* Results */}
-                {(originalMedia || processedMedia) && (
+                {results.length > 0 && (
                     <div style={styles.resultsSection}>
                         <h2 style={styles.resultsTitle}>
-                            Detection Results
+                            Detection Results ({results.length} images)
                         </h2>
                         
                         <div style={styles.resultsGrid}>
-                            {originalMedia && (
-                                <div style={styles.imageCard} className="image-card">
-                                    <h3 style={styles.imageTitle}>Original {mediaType}</h3>
+                            {results.map((result, index) => (
+                                <div key={result.id} style={styles.imageCard} className="image-card">
+                                    <h3 style={styles.imageTitle}>{result.filename} ({result.fileSize}MB)</h3>
                                     <div style={styles.mediaContainer}>
-                                        {mediaType === 'image' ? (
-                                            <img 
-                                                src={originalMedia} 
-                                                alt="Original" 
-                                                style={styles.media}
-                                                className="media"
-                                            />
+                                        {result.error ? (
+                                            <p style={styles.errorMessage}>❌ {result.error}</p>
                                         ) : (
-                                            <video 
-                                                src={originalMedia} 
-                                                controls
-                                                style={styles.media}
-                                                className="media"
-                                            />
+                                            <>
+                                                {result.original && (
+                                                    <div style={{flex: 1}}>
+                                                        <p style={{fontSize: '0.75rem', color: '#6b7280', marginBottom: '0.5rem'}}>Original</p>
+                                                        <img 
+                                                            src={result.original} 
+                                                            alt={`Original ${result.filename}`} 
+                                                            style={styles.media}
+                                                            className="media"
+                                                        />
+                                                    </div>
+                                                )}
+                                                {result.processed && (
+                                                    <div style={{flex: 1}}>
+                                                        <p style={{fontSize: '0.75rem', color: '#6b7280', marginBottom: '0.5rem'}}>Processed</p>
+                                                        <img 
+                                                            src={result.processed} 
+                                                            alt={`Processed ${result.filename}`} 
+                                                            style={styles.media}
+                                                            className="media"
+                                                        />
+                                                    </div>
+                                                )}
+                                            </>
                                         )}
                                     </div>
-                                    <button 
-                                        onClick={() => downloadMedia(originalMedia, `original_${mediaType}.${mediaType === 'image' ? 'jpg' : 'mp4'}`)}
-                                        style={styles.downloadButton}
-                                        className="download-button"
-                                    >
-                                        Download Original
-                                    </button>
+                                    
+                                    {!result.error && (
+                                        <div style={{display: 'flex', gap: '0.5rem'}}>
+                                            <button 
+                                                onClick={() => downloadSingleImage(result.original, result.filename, 'original')}
+                                                style={{...styles.downloadButton, flex: 1}}
+                                                className="download-button"
+                                            >
+                                                📥 Original
+                                            </button>
+                                            <button 
+                                                onClick={() => downloadSingleImage(result.processed, result.filename, 'processed')}
+                                                style={{...styles.downloadButton, flex: 1}}
+                                                className="download-button"
+                                            >
+                                                📥 Processed
+                                            </button>
+                                        </div>
+                                    )}
                                 </div>
-                            )}
-
-                            {processedMedia && (
-                                <div style={styles.imageCard} className="image-card">
-                                    <h3 style={styles.imageTitle}>Detection Result</h3>
-                                    <div style={styles.mediaContainer}>
-                                        {mediaType === 'image' ? (
-                                            <img 
-                                                src={processedMedia} 
-                                                alt="Processed with drone detection" 
-                                                style={styles.media}
-                                                className="media"
-                                            />
-                                        ) : (
-                                            <video 
-                                                src={processedMedia} 
-                                                controls
-                                                style={styles.media}
-                                                className="media"
-                                            />
-                                        )}
-                                    </div>
-                                    <button 
-                                        onClick={() => downloadMedia(processedMedia, `processed_${mediaType}.${mediaType === 'image' ? 'jpg' : 'mp4'}`)}
-                                        style={styles.downloadButton}
-                                        className="download-button"
-                                    >
-                                        Download Result
-                                    </button>
-                                </div>
-                            )}
+                            ))}
                         </div>
                     </div>
                 )}

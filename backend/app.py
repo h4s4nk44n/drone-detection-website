@@ -2,7 +2,7 @@ from flask import Flask, request, jsonify, make_response
 import os
 import base64
 from ultralytics import YOLO
-from yolo_utils import process_file_in_memory, process_youtube_video
+from yolo_utils import process_file_in_memory, process_youtube_video, log_memory_usage, cleanup_memory
 from flask_cors import CORS, cross_origin
 import traceback
 import tempfile
@@ -191,6 +191,7 @@ def log_request_info():
 def upload_file():
     try:
         print("🎯 Upload endpoint reached successfully")
+        log_memory_usage("upload start")
         
         # Cleanup old files first
         cleanup_old_files()
@@ -336,11 +337,20 @@ def upload_file():
                 "file_size_mb": round(file_size_mb, 2)
             }
             
+            # Clean up memory before returning
+            cleanup_memory()
+            log_memory_usage("upload success - direct response")
+            
             return jsonify(response_data)
         
     except Exception as e:
         print(f"❌ Error in upload_file: {str(e)}")
         traceback.print_exc()
+        
+        # Clean up memory on error
+        cleanup_memory()
+        log_memory_usage("upload error")
+        
         return jsonify({"error": f"Processing failed: {str(e)}"}), 500
 
 @app.route('/api/youtube', methods=['POST'])
@@ -929,6 +939,37 @@ def debug_temp_files():
         
     except Exception as e:
         print(f"❌ Debug endpoint error: {str(e)}")
+        response = jsonify({"error": str(e)})
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response, 500
+
+@app.route('/api/debug/memory', methods=['GET'])
+def debug_memory():
+    """Debug endpoint to check memory usage"""
+    try:
+        memory_mb = log_memory_usage("debug endpoint")
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        system_memory = psutil.virtual_memory()
+        
+        debug_info = {
+            "process_memory_mb": memory_info.rss / (1024 * 1024),
+            "system_memory_total_mb": system_memory.total / (1024 * 1024),
+            "system_memory_available_mb": system_memory.available / (1024 * 1024),
+            "system_memory_percent": system_memory.percent,
+            "active_temp_files": len(temp_files),
+            "active_downloads": len(active_downloads),
+            "memory_warning": memory_info.rss / (1024 * 1024) > 3000
+        }
+        
+        response = jsonify(debug_info)
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+        return response
+        
+    except Exception as e:
+        print(f"❌ Memory debug endpoint error: {str(e)}")
         response = jsonify({"error": str(e)})
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response, 500
