@@ -83,40 +83,81 @@ const FileUpload = () => {
     };
 
     const handleFileSelection = (selectedFiles) => {
-        // Filter for valid image files
+        // Filter for valid image and video files
         const validImageTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
-        const imageFiles = selectedFiles.filter(file => validImageTypes.includes(file.type));
+        const validVideoTypes = ['video/mp4', 'video/avi', 'video/mov', 'video/webm'];
+        const validTypes = [...validImageTypes, ...validVideoTypes];
         
-        if (imageFiles.length === 0) {
-            setError('Please select valid image files (JPG, PNG, WEBP)');
+        const validFiles = selectedFiles.filter(file => validTypes.includes(file.type));
+        
+        if (validFiles.length === 0) {
+            setError('Please select valid files (Images: JPG, PNG, WEBP | Videos: MP4, AVI, MOV, WEBM)');
             return;
         }
 
-        if (selectedFiles.length !== imageFiles.length) {
-            setError(`${selectedFiles.length - imageFiles.length} files were skipped (only images are supported)`);
+        if (selectedFiles.length !== validFiles.length) {
+            setError(`${selectedFiles.length - validFiles.length} files were skipped (only images and videos are supported)`);
+        }
+
+        // Separate images and videos
+        const imageFiles = validFiles.filter(f => validImageTypes.includes(f.type));
+        const videoFiles = validFiles.filter(f => validVideoTypes.includes(f.type));
+
+        // Check video limit - only one video allowed
+        if (videoFiles.length > 1) {
+            setError('Only one video can be processed at a time. Please select one video and unlimited images.');
+            return;
         }
 
         // Check total file size
-        const totalSize = imageFiles.reduce((sum, file) => sum + file.size, 0);
+        const totalSize = validFiles.reduce((sum, file) => sum + file.size, 0);
         const totalSizeMB = totalSize / (1024 * 1024);
-        const maxTotalSizeMB = 150; // 150MB total limit for multiple images
+        const maxTotalSizeMB = 200; // 200MB total limit
 
         if (totalSizeMB > maxTotalSizeMB) {
             setError(`Total file size too large (${totalSizeMB.toFixed(1)}MB). Maximum total size is ${maxTotalSizeMB}MB.`);
             return;
         }
 
-        // Check individual file sizes
-        const maxIndividualSizeMB = 25;
-        const oversizedFiles = imageFiles.filter(file => file.size / (1024 * 1024) > maxIndividualSizeMB);
+        // Check individual file sizes with different limits for images vs videos
+        const oversizedFiles = validFiles.filter(file => {
+            const fileSizeMB = file.size / (1024 * 1024);
+            const isVideo = validVideoTypes.includes(file.type);
+            const maxSize = isVideo ? 75 : 25; // 75MB for videos, 25MB for images
+            return fileSizeMB > maxSize;
+        });
+        
         if (oversizedFiles.length > 0) {
-            setError(`Some files are too large. Maximum individual file size is ${maxIndividualSizeMB}MB.`);
+            const videoFiles = oversizedFiles.filter(f => validVideoTypes.includes(f.type));
+            const imageFiles = oversizedFiles.filter(f => validImageTypes.includes(f.type));
+            
+            let errorMsg = 'Some files are too large: ';
+            if (videoFiles.length > 0) {
+                errorMsg += `Videos must be ≤75MB. `;
+            }
+            if (imageFiles.length > 0) {
+                errorMsg += `Images must be ≤25MB.`;
+            }
+            setError(errorMsg);
             return;
         }
 
-        setFiles(imageFiles);
+        setFiles(validFiles);
         setError('');
-        console.log(`✅ Selected ${imageFiles.length} files (${totalSizeMB.toFixed(1)}MB total)`);
+        
+        const imageCount = imageFiles.length;
+        const videoCount = videoFiles.length;
+        
+        let selectionMessage = '';
+        if (imageCount > 0 && videoCount > 0) {
+            selectionMessage = `✅ Selected ${imageCount} images + 1 video (${totalSizeMB.toFixed(1)}MB total)`;
+        } else if (imageCount > 0) {
+            selectionMessage = `✅ Selected ${imageCount} images (${totalSizeMB.toFixed(1)}MB total)`;
+        } else {
+            selectionMessage = `✅ Selected 1 video (${totalSizeMB.toFixed(1)}MB total)`;
+        }
+        
+        console.log(selectionMessage);
     };
 
     const processAllFiles = async () => {
@@ -128,7 +169,7 @@ const FileUpload = () => {
         setLoading(true);
         setResults([]);
         setProcessingProgress(0);
-        setMessage(`🔄 Processing ${files.length} images...`);
+        setMessage(`🔄 Processing ${files.length} files...`);
 
         const newResults = [];
 
@@ -138,16 +179,29 @@ const FileUpload = () => {
                 setCurrentlyProcessing(file.name);
                 setProcessingProgress(((i) / files.length) * 100);
 
-                console.log(`🔄 Processing file ${i + 1}/${files.length}: ${file.name}`);
-
-                const formData = new FormData();
-                formData.append('file', file);
+                const fileSizeMB = file.size / (1024 * 1024);
+                const isVideo = file.type.startsWith('video/');
+                
+                console.log(`🔄 Processing file ${i + 1}/${files.length}: ${file.name} (${fileSizeMB.toFixed(1)}MB, ${isVideo ? 'video' : 'image'})`);
 
                 try {
-                    const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
-                        method: 'POST',
-                        body: formData
-                    });
+                    let response;
+                    
+                    // Use chunked upload for large videos (>25MB)
+                    if (isVideo && fileSizeMB > 25) {
+                        console.log('🔄 Using chunked upload for large video...');
+                        const { processResponse } = await uploadLargeFile(file);
+                        response = processResponse;
+                    } else {
+                        // Standard upload for images and small videos
+                        const formData = new FormData();
+                        formData.append('file', file);
+                        
+                        response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload', {
+                            method: 'POST',
+                            body: formData
+                        });
+                    }
 
                     if (!response.ok) {
                         let errorMessage;
@@ -179,7 +233,8 @@ const FileUpload = () => {
                         filename: file.name,
                         original: originalUrl,
                         processed: processedUrl,
-                        fileSize: (file.size / (1024 * 1024)).toFixed(2)
+                        fileSize: fileSizeMB.toFixed(2),
+                        fileType: isVideo ? 'video' : 'image'
                     });
 
                     setResults([...newResults]);
@@ -191,14 +246,20 @@ const FileUpload = () => {
                         id: Date.now() + i,
                         filename: file.name,
                         error: fileError.message,
-                        fileSize: (file.size / (1024 * 1024)).toFixed(2)
+                        fileSize: fileSizeMB.toFixed(2),
+                        fileType: isVideo ? 'video' : 'image'
                     });
                     setResults([...newResults]);
                 }
             }
 
             setProcessingProgress(100);
-            setMessage(`✅ Completed processing ${files.length} images. ${newResults.filter(r => !r.error).length} successful, ${newResults.filter(r => r.error).length} failed.`);
+            const successCount = newResults.filter(r => !r.error).length;
+            const failCount = newResults.filter(r => r.error).length;
+            const imageCount = newResults.filter(r => r.fileType === 'image' && !r.error).length;
+            const videoCount = newResults.filter(r => r.fileType === 'video' && !r.error).length;
+            
+            setMessage(`✅ Completed processing ${files.length} files. ${successCount} successful (${imageCount} images, ${videoCount} videos), ${failCount} failed.`);
 
         } catch (error) {
             console.error('❌ Batch processing failed:', error);
@@ -312,6 +373,54 @@ const FileUpload = () => {
             console.error(`❌ Chunked download failed for ${fileType}:`, error);
             throw error;
         }
+    };
+
+    const uploadLargeFile = async (file) => {
+        const CHUNK_SIZE = 25 * 1024 * 1024; // 25MB chunks
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+        
+        console.log(`📦 Splitting ${(file.size / (1024 * 1024)).toFixed(1)}MB file into ${totalChunks} chunks`);
+        
+        const uploadId = Date.now().toString();
+        
+        for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+            const start = chunkIndex * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            
+            const chunkFormData = new FormData();
+            chunkFormData.append('chunk', chunk);
+            chunkFormData.append('chunkIndex', chunkIndex.toString());
+            chunkFormData.append('totalChunks', totalChunks.toString());
+            chunkFormData.append('uploadId', uploadId);
+            chunkFormData.append('fileName', file.name);
+            
+            console.log(`🔄 Uploading chunk ${chunkIndex + 1}/${totalChunks}`);
+            setMessage(`🔄 Uploading chunk ${chunkIndex + 1}/${totalChunks} for ${file.name}...`);
+
+            const response = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/upload-chunk', {
+                method: 'POST',
+                body: chunkFormData
+            });
+
+            if (!response.ok) {
+                throw new Error(`Chunk ${chunkIndex + 1} upload failed`);
+            }
+        }
+        
+        // Process the complete file
+        console.log('📋 Processing complete file...');
+        setMessage(`🤖 Processing complete file ${file.name}... This may take several minutes...`);
+        
+        const controller = new AbortController();
+        const processResponse = await fetch('https://drone-detection-686868741947.europe-west1.run.app/api/process-uploaded', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ uploadId, fileName: file.name }),
+            signal: controller.signal
+        });
+        
+        return { processResponse, controller };
     };
 
     const downloadSingleImage = (imageUrl, filename, type) => {
@@ -922,7 +1031,7 @@ const FileUpload = () => {
                         AI-Powered Drone Detection
                     </h1>
                     <p style={styles.subtitle}>
-                        Upload multiple images and let our advanced machine learning model detect and highlight drones with precision and accuracy.
+                        Upload unlimited images and one video and let our advanced machine learning model detect and highlight drones with precision and accuracy.
                     </p>
                 </div>
 
@@ -933,7 +1042,7 @@ const FileUpload = () => {
                             type="file"
                             ref={fileInputRef}
                             onChange={handleFileChange}
-                            accept="image/*"
+                            accept="image/*,video/*"
                             multiple
                             style={styles.fileInput}
                             id="file-upload"
@@ -948,10 +1057,10 @@ const FileUpload = () => {
                             onDrop={handleDrop}
                         >
                             <span style={styles.uploadText}>
-                                {dragActive ? '📁 Drop files here!' : '📁 Choose Images or Drag & Drop'}
+                                {dragActive ? '📁 Drop files here!' : '📁 Choose Images/Videos or Drag & Drop'}
                             </span>
                             <span style={styles.uploadSubtext}>
-                                Select multiple images (JPG, PNG, WEBP) - Max 150MB total
+                                Select unlimited images + max 1 video (Images: JPG, PNG, WEBP ≤25MB | Videos: MP4, AVI, MOV, WEBM ≤75MB) - Max 200MB total
                             </span>
                         </label>
                         
@@ -979,7 +1088,7 @@ const FileUpload = () => {
                             className="upload-button"
                         >
                             {loading && <span style={styles.loadingSpinner}></span>}
-                            {loading ? `Processing ${files.length} images...` : `📤 Analyze ${files.length} Files`}
+                            {loading ? `Processing ${files.length} files...` : `📤 Analyze ${files.length} Files`}
                         </button>
 
                         {/* Bulk Controls */}
@@ -1027,9 +1136,9 @@ const FileUpload = () => {
                                 🎯 Extract Training Dataset
                             </h3>
                             <p style={styles.trainingDescription}>
-                                Generate YOLO format training datasets from your uploaded images. This will extract frames with 
+                                Generate YOLO format training datasets from your uploaded images and videos. This will extract frames with 
                                 drone detections and create properly formatted annotation files for training your own models.
-                                Works with multiple images to create a comprehensive dataset.
+                                Works with multiple files to create a comprehensive dataset.
                             </p>
 
                             <div style={styles.sliderContainer}>
@@ -1118,13 +1227,18 @@ const FileUpload = () => {
                 {results.length > 0 && (
                     <div style={styles.resultsSection}>
                         <h2 style={styles.resultsTitle}>
-                            Detection Results ({results.length} images)
+                            Detection Results ({results.length} files)
                         </h2>
                         
                         <div style={styles.resultsGrid}>
                             {results.map((result, index) => (
                                 <div key={result.id} style={styles.imageCard} className="image-card">
-                                    <h3 style={styles.imageTitle}>{result.filename} ({result.fileSize}MB)</h3>
+                                    <h3 style={styles.imageTitle}>
+                                        {result.filename} ({result.fileSize}MB) 
+                                        <span style={{fontSize: '0.75rem', color: '#6b7280', marginLeft: '0.5rem'}}>
+                                            [{result.fileType === 'video' ? '🎥 Video' : '🖼️ Image'}]
+                                        </span>
+                                    </h3>
                                     <div style={styles.mediaContainer}>
                                         {result.error ? (
                                             <p style={styles.errorMessage}>❌ {result.error}</p>
@@ -1133,23 +1247,41 @@ const FileUpload = () => {
                                                 {result.original && (
                                                     <div style={{flex: 1}}>
                                                         <p style={{fontSize: '0.75rem', color: '#6b7280', marginBottom: '0.5rem'}}>Original</p>
-                                                        <img 
-                                                            src={result.original} 
-                                                            alt={`Original ${result.filename}`} 
-                                                            style={styles.media}
-                                                            className="media"
-                                                        />
+                                                        {result.fileType === 'video' ? (
+                                                            <video 
+                                                                src={result.original} 
+                                                                controls
+                                                                style={styles.media}
+                                                                className="media"
+                                                            />
+                                                        ) : (
+                                                            <img 
+                                                                src={result.original} 
+                                                                alt={`Original ${result.filename}`} 
+                                                                style={styles.media}
+                                                                className="media"
+                                                            />
+                                                        )}
                                                     </div>
                                                 )}
                                                 {result.processed && (
                                                     <div style={{flex: 1}}>
                                                         <p style={{fontSize: '0.75rem', color: '#6b7280', marginBottom: '0.5rem'}}>Processed</p>
-                                                        <img 
-                                                            src={result.processed} 
-                                                            alt={`Processed ${result.filename}`} 
-                                                            style={styles.media}
-                                                            className="media"
-                                                        />
+                                                        {result.fileType === 'video' ? (
+                                                            <video 
+                                                                src={result.processed} 
+                                                                controls
+                                                                style={styles.media}
+                                                                className="media"
+                                                            />
+                                                        ) : (
+                                                            <img 
+                                                                src={result.processed} 
+                                                                alt={`Processed ${result.filename}`} 
+                                                                style={styles.media}
+                                                                className="media"
+                                                            />
+                                                        )}
                                                     </div>
                                                 )}
                                             </>
