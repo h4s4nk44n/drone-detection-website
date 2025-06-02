@@ -170,7 +170,7 @@ def cleanup_old_files():
                 expired_files.append(file_id)
             else:
                 age_hours = (current_time - last_access) / 3600
-                print(f" फाइल {file_id} is not expired. Age: {age_hours:.1f} hours.")
+                print(f" File {file_id} is not expired. Age: {age_hours:.1f} hours.")
         elif file_id not in temp_files and not os.path.exists(os.path.join(temp_dir_path, f"{file_id}_metadata.json")):
             # This file_id came from listdir but has no corresponding metadata or in-memory entry.
             # It might be a stray .data file or an incomplete upload. Risky to delete without more info.
@@ -1173,20 +1173,31 @@ def extract_training_data():
             print(f"📊 Result length: {len(result) if hasattr(result, '__len__') else 'N/A'}")
             
             # Unpack the result
-            if len(result) == 5:  # With training data
-                original_base64, processed_base64, mime_type, zip_data, extracted_count = result
+            if len(result) == 6: # This is the expected case when extract_training_data=True
+                original_base64, processed_base64, mime_type, training_images_data, training_labels_data, extracted_count = result
                 print(f"🎯 Training data extracted: {extracted_count} samples")
-                print(f"📦 ZIP data size: {len(zip_data) if zip_data else 0} bytes")
-            else:  # No training data extracted
+
+                if extracted_count > 0:
+                    # If training data was extracted, it's raw images and labels. We need to create the ZIP.
+                    print(f"📦 Creating ZIP for {extracted_count} samples for {file.filename}")
+                    zip_data = create_combined_training_dataset_zip(training_images_data, training_labels_data, file.filename)
+                    print(f"📦 ZIP data size: {len(zip_data) if zip_data else 0} bytes")
+                else:
+                    zip_data = None # No data extracted, so no ZIP
+                    print(f"⚠️ No actual training samples extracted, though 6 values returned (empty lists).")
+
+            elif len(result) == 3: # This case should not be hit if extract_training_data=True, but handle for robustness
                 original_base64, processed_base64, mime_type = result
                 zip_data = None
                 extracted_count = 0
-                print(f"⚠️ No training data in result - only {len(result)} elements returned")
-            
+                print(f"⚠️ No training data in result - only {len(result)} elements returned (extract_training_data was likely False or error occurred before data formation).")
+            else: # Unexpected number of results
+                raise ValueError(f"Unexpected number of values ({len(result)}) returned from process_file_in_memory.")
+
             print(f"📋 Final extracted count: {extracted_count}")
             
-            if extracted_count == 0:
-                print(f"⚠️ No training data extracted - preparing detailed error response")
+            if extracted_count == 0 or zip_data is None: # Check if zip_data is also None
+                print(f"⚠️ No training data extracted or ZIP not created - preparing detailed error response")
                 # Enhanced error message with debugging info
                 debug_info = {
                     "error": "No drone detections found meeting the confidence criteria.",

@@ -713,7 +713,7 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                 training_labels.clear()
                 # Return empty lists for consistency
                 return original_base64, processed_base64, 'image/jpeg', [], [], 0
-            else: // Not extracting training data
+            else: # Not extracting training data
                 return original_base64, processed_base64, 'image/jpeg'
     
     finally:
