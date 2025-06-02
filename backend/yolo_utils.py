@@ -451,15 +451,27 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                 if os.path.exists(temp_output_path):
                     os.unlink(temp_output_path)
                 
-                # Use FFmpeg fallback (Note: training data extraction not supported in FFmpeg fallback)
+                # Use FFmpeg fallback - now supports training data extraction
                 try:
-                    processed_output = process_video_with_ffmpeg(temp_input_path, temp_output_path, model)
+                    ffmpeg_result = process_video_with_ffmpeg(temp_input_path, temp_output_path, model, extract_training_data, confidence_threshold)
+                    
+                    if extract_training_data:
+                        # FFmpeg now returns training data
+                        if len(ffmpeg_result) == 4:  # processed_output, training_images, training_labels, extracted_count
+                            processed_output, ffmpeg_training_images, ffmpeg_training_labels, ffmpeg_extracted_count = ffmpeg_result
+                            training_images.extend(ffmpeg_training_images)
+                            training_labels.extend(ffmpeg_training_labels)
+                            extracted_count += ffmpeg_extracted_count
+                            print(f"🎯 FFmpeg extracted {ffmpeg_extracted_count} training samples")
+                        else:
+                            processed_output = ffmpeg_result
+                    else:
+                        processed_output = ffmpeg_result
+                    
                     if os.path.exists(processed_output) and os.path.getsize(processed_output) > 1024:
                         temp_output_path = processed_output
                         processed_successfully = True
                         print("✅ FFmpeg video processing complete")
-                        if extract_training_data:
-                            print("⚠️ Training data extraction not available with FFmpeg fallback")
                     else:
                         raise Exception("FFmpeg output file invalid")
                         
@@ -500,11 +512,11 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
                 zip_data = create_training_dataset_zip(training_images, training_labels, filename)
                 return original_base64, processed_base64, 'video/mp4', zip_data, extracted_count
             elif extract_training_data and extracted_count == 0:
+                # Provide better error messages now that both OpenCV and FFmpeg support training data extraction
+                print(f"⚠️ No training data extracted - no detections met confidence threshold {confidence_threshold}")
+                print(f"💡 Suggestion: Try lowering confidence threshold to 0.1 or 0.2")
                 if opencv_error is not None:
-                    print(f"⚠️ No training data extracted - FFmpeg fallback doesn't support training data extraction")
-                else:
-                    print(f"⚠️ No training data extracted - no detections met confidence threshold {confidence_threshold}")
-                    print(f"💡 Suggestion: Try lowering confidence threshold to 0.1 or 0.2")
+                    print(f"   - Note: Used FFmpeg fallback due to OpenCV error: {str(opencv_error)[:100]}...")
                 return original_base64, processed_base64, 'video/mp4'
             else:
                 return original_base64, processed_base64, 'video/mp4'
@@ -1039,11 +1051,19 @@ def process_video_with_ffmpeg_fallback(input_path, output_path, model):
         # FFmpeg approach: process frames and use FFmpeg to encode
         return process_video_with_ffmpeg(input_path, output_path, model)
 
-def process_video_with_ffmpeg(input_path, output_path, model):
+def process_video_with_ffmpeg(input_path, output_path, model, extract_training_data=False, confidence_threshold=0.3):
     """
     Process video using frame extraction + FFmpeg encoding
+    Now supports training data extraction
     """
     print(f"🛠️ Processing video with FFmpeg...")
+    if extract_training_data:
+        print(f"🎯 FFmpeg processing with training data extraction enabled (confidence: {confidence_threshold})")
+    
+    # Training data collection
+    training_images = []
+    training_labels = []
+    extracted_count = 0
     
     # Create temp directory for frames
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -1106,32 +1126,93 @@ def process_video_with_ffmpeg(input_path, output_path, model):
                         detections = model.predict(frame_resized)
                         if len(detections) > 0:
                             processed_frame = model.draw_detections(frame_resized, detections)
+                            
+                            # Extract training data for ONNX model if needed
+                            if extract_training_data:
+                                for detection in detections:
+                                    if detection['confidence'] >= confidence_threshold:
+                                        # Use original resolution frame for training data
+                                        original_frame = cv2.resize(frame, (width, height))
+                                        training_images.append(original_frame.copy())
+                                        
+                                        # Create YOLO format label
+                                        x1, y1, x2, y2 = detection['bbox']
+                                        center_x = (x1 + x2) / 2 / width
+                                        center_y = (y1 + y2) / 2 / height
+                                        bbox_width = (x2 - x1) / width
+                                        bbox_height = (y2 - y1) / height
+                                        
+                                        label = f"0 {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                                        training_labels.append(label)
+                                        extracted_count += 1
+                                        break  # One detection per frame
                         else:
                             processed_frame = frame_resized
                     else:
                         # PyTorch model
-                        results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
+                        if extract_training_data:
+                            # For training data extraction, use lower model conf to capture more detections
+                            results = model.predict(frame_resized, verbose=False, conf=0.1)
+                        else:
+                            # For regular processing, use standard conf
+                            results = model.predict(frame_resized, verbose=False, conf=0.3, imgsz=YOLO_PROCESSING_SIZE)
+                            
                         processed_frame = results[0].plot()
-                    
-                    # Save frame as image
-                    frame_filename = os.path.join(frames_dir, f"frame_{saved_frames:06d}.jpg")
-                    cv2.imwrite(frame_filename, processed_frame)
-                    saved_frames += 1
-                    
-                    if saved_frames % 50 == 0:
-                        print(f"📹 Processed {saved_frames} frames...")
                         
+                        # Extract training data for PyTorch model if needed
+                        if extract_training_data:
+                            boxes = results[0].boxes
+                            if frame_count % 100 == 0:  # Reduced logging frequency
+                                print(f"🔍 FFmpeg Frame {frame_count}: model.predict() with conf=0.1 found {len(boxes) if boxes is not None else 0} detections")
+                            
+                            if boxes is not None and len(boxes) > 0:
+                                # Filter by user's confidence threshold
+                                confident_boxes = boxes[boxes.conf >= confidence_threshold]
+                                
+                                if len(confident_boxes) > 0:
+                                    # Use original resolution frame for training data
+                                    original_frame = cv2.resize(frame, (width, height))
+                                    training_images.append(original_frame.copy())
+                                    
+                                    # Take the most confident detection
+                                    best_box = confident_boxes[confident_boxes.conf.argmax()]
+                                    best_conf = float(best_box.conf.cpu().numpy())
+                                    
+                                    # Convert to YOLO format (normalized coordinates)
+                                    x1, y1, x2, y2 = best_box.xyxy[0].cpu().numpy()
+                                    center_x = (x1 + x2) / 2 / width
+                                    center_y = (y1 + y2) / 2 / height
+                                    bbox_width = (x2 - x1) / width
+                                    bbox_height = (y2 - y1) / height
+                                    class_id = int(best_box.cls.cpu().numpy())
+                                    
+                                    label = f"{class_id} {center_x:.6f} {center_y:.6f} {bbox_width:.6f} {bbox_height:.6f}"
+                                    training_labels.append(label)
+                                    extracted_count += 1
+                                    
+                                    if frame_count % 100 == 0:  # Reduced logging frequency
+                                        print(f"🎯 FFmpeg Frame {frame_count}: Using detection with confidence {best_conf:.3f} for training")
+                    
+                    frame_to_write = processed_frame
                 except Exception as ai_error:
                     print(f"⚠️ AI failed on frame {frame_count}: {ai_error}")
-                    # Save original frame
-                    frame_filename = os.path.join(frames_dir, f"frame_{saved_frames:06d}.jpg")
-                    cv2.imwrite(frame_filename, frame_resized)
-                    saved_frames += 1
-        
+                    frame_to_write = frame_resized
+                
+                # Save frame as image
+                frame_filename = os.path.join(frames_dir, f"frame_{saved_frames:06d}.jpg")
+                cv2.imwrite(frame_filename, frame_to_write)
+                saved_frames += 1
+                
+                if saved_frames % 50 == 0:
+                    extraction_info = f", extracted: {extracted_count}" if extract_training_data else ""
+                    print(f"📹 FFmpeg processed {saved_frames} frames{extraction_info}...")
+                        
         finally:
             cap.release()
         
-        print(f"✅ Extracted and processed {saved_frames} frames")
+        print(f"✅ FFmpeg extracted and processed {saved_frames} frames")
+        if extract_training_data:
+            print(f"🎯 FFmpeg training data extraction: {extracted_count} samples collected")
         
         # Use FFmpeg to create video from frames
         if saved_frames == 0:
@@ -1179,7 +1260,11 @@ def process_video_with_ffmpeg(input_path, output_path, model):
         
         print(f"📊 FFmpeg output: {file_size / (1024*1024):.2f} MB")
         
-        return output_path
+        # Return training data if extracted
+        if extract_training_data and extracted_count > 0:
+            return output_path, training_images, training_labels, extracted_count
+        else:
+            return output_path
 
 def process_youtube_video(youtube_url, model):
     """
