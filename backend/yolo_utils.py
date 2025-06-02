@@ -582,24 +582,19 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
             
             # Return with or without training data
             if extract_training_data and extracted_count > 0:
-                zip_data = create_training_dataset_zip(training_images, training_labels, filename)
-                # Clear training data from memory after ZIP creation
-                training_images.clear()
-                training_labels.clear()
-                cleanup_memory()
-                log_memory_usage("after ZIP creation")
-                return original_base64, processed_base64, 'video/mp4', zip_data, extracted_count
+                print(f"✅ Returning raw training data: {extracted_count} samples for {filename}")
+                return original_base64, processed_base64, 'video/mp4', training_images, training_labels, extracted_count
             elif extract_training_data and extracted_count == 0:
                 # Provide better error messages now that both OpenCV and FFmpeg support training data extraction
-                print(f"⚠️ No training data extracted - no detections met confidence threshold {confidence_threshold}")
-                print(f"💡 Suggestion: Try lowering confidence threshold to 0.1 or 0.2")
+                print(f"⚠️ No training data extracted - no detections met confidence threshold {confidence_threshold} for {filename}")
                 if opencv_error is not None:
                     print(f"   - Note: Used FFmpeg fallback due to OpenCV error: {str(opencv_error)[:100]}...")
                 # Clear empty training data from memory
                 training_images.clear()
                 training_labels.clear()
                 cleanup_memory()
-                return original_base64, processed_base64, 'video/mp4'
+                # Return empty lists for consistency
+                return original_base64, processed_base64, 'video/mp4', [], [], 0
             else:
                 cleanup_memory()
                 log_memory_usage("final cleanup")
@@ -710,12 +705,15 @@ def process_file_in_memory(file_data, file_ext, filename, model, extract_trainin
             
             # Return with or without training data
             if extract_training_data and extracted_count > 0:
-                zip_data = create_training_dataset_zip(training_images, training_labels, filename)
-                return original_base64, processed_base64, 'image/jpeg', zip_data, extracted_count
+                print(f"✅ Returning raw training data: {extracted_count} samples for {filename} (image)")
+                return original_base64, processed_base64, 'image/jpeg', training_images, training_labels, extracted_count
             elif extract_training_data and extracted_count == 0:
-                print(f"⚠️ No training data extracted from image - all detections were below confidence threshold {confidence_threshold}")
-                return original_base64, processed_base64, 'image/jpeg'
-            else:
+                print(f"⚠️ No training data extracted from image - all detections were below confidence threshold {confidence_threshold} for {filename}")
+                training_images.clear() # Ensure lists are cleared if they were populated then emptied
+                training_labels.clear()
+                # Return empty lists for consistency
+                return original_base64, processed_base64, 'image/jpeg', [], [], 0
+            else: // Not extracting training data
                 return original_base64, processed_base64, 'image/jpeg'
     
     finally:

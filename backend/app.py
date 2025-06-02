@@ -1261,11 +1261,10 @@ def extract_training_data():
 
 @app.route('/api/extract-training-data-bulk', methods=['POST'])
 def extract_training_data_bulk():
-    """Extract YOLO format training data from multiple uploaded files and combine into one dataset"""
+    """Extract YOLO format training data from multiple uploaded files (images and videos) and combine into one dataset"""
     try:
-        print("🎯 === BULK TRAINING DATA EXTRACTION ENDPOINT REACHED ===")
+        print("🎯 === BULK TRAINING DATA EXTRACTION ENDPOINT REACHED (IMAGES & VIDEOS) ===")
         
-        # Cleanup old files first
         cleanup_old_files()
         
         if 'files' not in request.files:
@@ -1278,122 +1277,117 @@ def extract_training_data_bulk():
             return jsonify({"error": "No files selected"}), 400
         
         print(f"📁 Files received: {len(files)} files")
-        for file in files:
-            if file.filename:
-                print(f"   - {file.filename}")
+        for file_obj in files: # Renamed to avoid conflict with os.path.file
+            if file_obj.filename:
+                print(f"   - {file_obj.filename}")
         
-        # Get confidence threshold from request (optional)
         confidence_threshold = float(request.form.get('confidence', 0.3))
         if confidence_threshold < 0.1 or confidence_threshold > 0.9:
             confidence_threshold = 0.3
         
         print(f"🎯 Confidence threshold: {confidence_threshold}")
         
-        # Collect all training data from all files
         all_training_images = []
         all_training_labels = []
         total_extracted_count = 0
         files_with_detections = []
         files_without_detections = []
         
-        for i, file in enumerate(files):
-            if not file.filename:
+        for i, file_obj in enumerate(files):
+            if not file_obj.filename:
                 continue
                 
             try:
-                print(f"🔄 Processing file {i+1}/{len(files)}: {file.filename}")
+                print(f"🔄 Processing file {i+1}/{len(files)}: {file_obj.filename}")
                 
-                # Read file data
-                file_data = file.read()
+                file_data = file_obj.read()
                 file_size_mb = len(file_data) / (1024 * 1024)
                 
-                # File size check
-                if file_size_mb > 50:  # Lower limit for bulk processing
-                    print(f"⚠️ Skipping {file.filename}: too large ({file_size_mb:.2f}MB)")
+                # Adjusted file size limit for individual files in bulk, especially for videos
+                # Videos can be larger, but will be processed frame by frame.
+                # Images should still be reasonably sized.
+                file_ext = os.path.splitext(file_obj.filename)[1].lower()
+                is_video = file_ext in ['.mp4', '.avi', '.mov', '.webm']
+                max_size_mb = 75 if is_video else 25 # 75MB for videos, 25MB for images in bulk training
+
+                if file_size_mb > max_size_mb:
+                    print(f"⚠️ Skipping {file_obj.filename}: too large ({file_size_mb:.2f}MB). Max is {max_size_mb}MB for its type.")
+                    files_without_detections.append(f"{file_obj.filename} (too large)")
                     continue
                 
-                # Get file extension
-                file_ext = os.path.splitext(file.filename)[1].lower()
-                
-                # File type validation - only images for bulk training extraction
-                allowed_extensions = {'.jpg', '.jpeg', '.png'}
+                # File type validation - allow images and videos
+                allowed_extensions = {'.jpg', '.jpeg', '.png', '.mp4', '.avi', '.mov', '.webm'}
                 if file_ext not in allowed_extensions:
-                    print(f"⚠️ Skipping {file.filename}: unsupported type {file_ext}")
+                    print(f"⚠️ Skipping {file_obj.filename}: unsupported type {file_ext}")
+                    files_without_detections.append(f"{file_obj.filename} (unsupported type)")
                     continue
                 
-                print(f"📊 Processing {file.filename} ({file_size_mb:.2f}MB)")
+                print(f"📊 Processing {file_obj.filename} ({file_size_mb:.2f}MB, type: {file_ext})")
                 
-                # Process file and extract training data
+                # Call the modified process_file_in_memory
+                # Expecting: original_base64, processed_base64, mime_type, p_training_images, p_training_labels, p_extracted_count
                 result = process_file_in_memory(
-                    file_data, file_ext, file.filename, model, 
+                    file_data, file_ext, file_obj.filename, model, 
                     extract_training_data=True, 
                     confidence_threshold=confidence_threshold
                 )
                 
-                if len(result) == 5:  # With training data
-                    original_base64, processed_base64, mime_type, zip_data, extracted_count = result
-                    
-                    if extracted_count > 0:
-                        print(f"✅ {file.filename}: {extracted_count} samples extracted")
-                        files_with_detections.append(file.filename)
-                        total_extracted_count += extracted_count
-                        
-                        # Extract images and labels from the individual ZIP
-                        # We need to unpack the ZIP and add to our combined collection
-                        
-                        zip_buffer = BytesIO(zip_data)
-                        with zipfile.ZipFile(zip_buffer, 'r') as zip_file:
-                            # Read all images and labels from this file's ZIP
-                            for file_info in zip_file.filelist:
-                                if file_info.filename.startswith('images/') and file_info.filename.endswith('.jpg'):
-                                    # Read image data
-                                    image_data = zip_file.read(file_info.filename)
-                                    # Convert to OpenCV format
-                                    nparr = np.frombuffer(image_data, np.uint8)
-                                    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                                    if image is not None:
-                                        all_training_images.append(image)
-                                        
-                                        # Find corresponding label file
-                                        label_filename = file_info.filename.replace('images/', 'labels/').replace('.jpg', '.txt')
-                                        if label_filename in [f.filename for f in zip_file.filelist]:
-                                            label_data = zip_file.read(label_filename).decode('utf-8')
-                                            all_training_labels.append(label_data)
-                                        else:
-                                            all_training_labels.append("")  # Empty label if not found
-                    else:
-                        print(f"⚠️ {file.filename}: No detections found")
-                        files_without_detections.append(file.filename)
+                # Unpack results carefully based on length (to handle cases where not all 6 are returned, e.g. error or no extraction attempted)
+                if len(result) == 6:
+                    _, _, _, p_training_images, p_training_labels, p_extracted_count = result
+                elif len(result) == 3: # Fallback if only base results returned (e.g. non-extraction mode or error before extraction data formed)
+                    p_training_images, p_training_labels, p_extracted_count = [], [], 0
+                    print(f"⚠️ {file_obj.filename}: Received 3 values from process_file_in_memory, expecting 6 for training. Assuming no detections.")
                 else:
-                    print(f"⚠️ {file.filename}: No training data returned")
-                    files_without_detections.append(file.filename)
+                    print(f"❌ {file_obj.filename}: Unexpected number of values ({len(result)}) from process_file_in_memory. Skipping.")
+                    files_without_detections.append(f"{file_obj.filename} (processing error)")
+                    continue # Skip this file
+
+                if p_extracted_count > 0 and p_training_images and p_training_labels:
+                    print(f"✅ {file_obj.filename}: {p_extracted_count} samples extracted.")
+                    all_training_images.extend(p_training_images)
+                    all_training_labels.extend(p_training_labels)
+                    total_extracted_count += p_extracted_count
+                    files_with_detections.append(file_obj.filename)
+                else:
+                    print(f"⚠️ {file_obj.filename}: No detections found or no training data returned.")
+                    files_without_detections.append(file_obj.filename)
                     
             except Exception as file_error:
-                print(f"❌ Error processing {file.filename}: {str(file_error)}")
-                files_without_detections.append(file.filename)
+                print(f"❌ Error processing {file_obj.filename}: {str(file_error)}")
+                traceback.print_exc() # Print full traceback for file processing errors
+                files_without_detections.append(f"{file_obj.filename} (error: {str(file_error)[:50]}...)")
                 continue
+            finally:
+                # Explicitly clear large data from loop to help memory, if possible
+                if 'file_data' in locals(): del file_data
+                if 'result' in locals(): del result
+                if 'p_training_images' in locals(): del p_training_images
+                if 'p_training_labels' in locals(): del p_training_labels
+                gc.collect()
         
         print(f"📊 Bulk extraction summary:")
-        print(f"   - Total samples: {total_extracted_count}")
+        print(f"   - Total samples accumulated: {total_extracted_count}")
         print(f"   - Files with detections: {len(files_with_detections)}")
-        print(f"   - Files without detections: {len(files_without_detections)}")
+        print(f"   - Files without detections/errors: {len(files_without_detections)}")
         
         if total_extracted_count == 0:
             return jsonify({
-                "error": "No drone detections found in any of the uploaded files.",
+                "error": "No drone detections found in any of the uploaded files meeting the criteria.",
                 "debug_info": {
                     "confidence_threshold_used": confidence_threshold,
-                    "files_processed": len(files),
-                    "files_without_detections": files_without_detections
+                    "files_processed_count": len(files),
+                    "files_with_detections_list": files_with_detections,
+                    "files_without_detections_list": files_without_detections
                 },
                 "suggestions": [
                     f"Try a lower confidence threshold (current: {confidence_threshold})",
-                    "Ensure the images contain clearly visible drones",
-                    "Check that the drones are not too small in the frames"
+                    "Ensure the files contain clearly visible drones."
                 ]
             }), 400
         
         # Create combined training dataset ZIP
+        print(f"📦 Creating combined ZIP for {total_extracted_count} samples from {len(all_training_images)} images/frames.")
         combined_zip_data = create_combined_training_dataset_zip(
             all_training_images, 
             all_training_labels, 
@@ -1402,15 +1396,22 @@ def extract_training_data_bulk():
         
         # Convert ZIP to base64 for download
         zip_base64 = base64.b64encode(combined_zip_data).decode('utf-8')
+        dataset_size_mb = round(len(combined_zip_data) / (1024 * 1024), 2)
+
+        # Clean up large lists from memory after use
+        del all_training_images
+        del all_training_labels
+        del combined_zip_data
+        gc.collect()
         
         return jsonify({
-            "message": f"Bulk training data extracted successfully: {total_extracted_count} samples from {len(files_with_detections)} files",
+            "message": f"Bulk training data extracted: {total_extracted_count} samples from {len(files_with_detections)} files",
             "extracted_count": total_extracted_count,
             "files_with_detections": files_with_detections,
             "files_without_detections": files_without_detections,
             "confidence_threshold": confidence_threshold,
             "dataset_zip": f"data:application/zip;base64,{zip_base64}",
-            "dataset_size_mb": round(len(combined_zip_data) / (1024 * 1024), 2)
+            "dataset_size_mb": dataset_size_mb
         })
         
     except Exception as e:
