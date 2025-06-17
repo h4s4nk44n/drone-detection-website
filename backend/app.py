@@ -49,44 +49,54 @@ temp_files = {}
 active_downloads = set()
 
 def load_temp_files_from_disk():
-    """Load temp file tracking from disk on startup"""
+    """Load saved file metadata from disk on startup"""
     temp_dir = tempfile.gettempdir()
-    print(f"🔄 Loading temp files from disk: {temp_dir}")
+    loaded = 0
     
-    for filename in os.listdir(temp_dir):
-        if filename.endswith('_metadata.json'):
-            try:
-                file_id = filename.replace('_metadata.json', '')
-                metadata_path = os.path.join(temp_dir, filename)
-                
-                with open(metadata_path, 'r') as f:
-                    file_info = json.load(f)
-                
-                # Check if the actual file still exists
-                if os.path.exists(file_info['path']):
-                    temp_files[file_id] = file_info
-                    print(f"📋 Restored file tracking: {file_id}")
-                else:
-                    # Clean up orphaned metadata
-                    os.unlink(metadata_path)
-                    print(f"🧹 Removed orphaned metadata: {file_id}")
+    try:
+        for item in os.listdir(temp_dir):
+            if item.endswith('_metadata.json'):
+                file_id = item.replace('_metadata.json', '')
+                try:
+                    with open(os.path.join(temp_dir, item), 'r') as f:
+                        file_info = json.load(f)
+                        
+                    # Convert downloaded_chunks back to set
+                    if 'downloaded_chunks' in file_info:
+                        file_info['downloaded_chunks'] = set(file_info['downloaded_chunks'])
+                    else:
+                        file_info['downloaded_chunks'] = set()
+                        
+                    if os.path.exists(file_info['path']):
+                        temp_files[file_id] = file_info
+                        loaded += 1
+                        print(f"📂 Loaded {file_id} from disk")
+                except Exception as e:
+                    print(f"⚠️ Error loading {item}: {e}")
                     
-            except Exception as e:
-                print(f"⚠️ Failed to load metadata {filename}: {e}")
+        print(f"✅ Loaded {loaded} files from disk")
+    except Exception as e:
+        print(f"⚠️ Error listing temp directory: {e}")
+        
+    return loaded
 
 def save_temp_file_metadata(file_id, file_info):
-    """Save temp file metadata to disk"""
+    """Save file metadata to disk for persistence across workers"""
     try:
-        temp_dir = tempfile.gettempdir()
-        metadata_path = os.path.join(temp_dir, f"{file_id}_metadata.json")
+        # Initialize downloaded_chunks if not present
+        if 'downloaded_chunks' not in file_info:
+            file_info['downloaded_chunks'] = set()
+            
+        # Convert set to list for JSON serialization
+        file_info_json = file_info.copy()
+        file_info_json['downloaded_chunks'] = list(file_info['downloaded_chunks'])
         
+        metadata_path = os.path.join(tempfile.gettempdir(), f"{file_id}_metadata.json")
         with open(metadata_path, 'w') as f:
-            json.dump(file_info, f)
-        
-        print(f"💾 Saved metadata for: {file_id}")
-        
+            json.dump(file_info_json, f)
+        print(f"💾 Saved metadata for {file_id}")
     except Exception as e:
-        print(f"⚠️ Failed to save metadata for {file_id}: {e}")
+        print(f"⚠️ Error saving metadata for {file_id}: {e}")
 
 def remove_temp_file_metadata(file_id):
     """Remove temp file metadata from disk"""
@@ -102,7 +112,7 @@ def remove_temp_file_metadata(file_id):
         print(f"⚠️ Failed to remove metadata for {file_id}: {e}")
 
 def cleanup_old_files():
-    """Clean up files older than 2 hours (increased from 1 hour for chunked downloads)"""
+    """Clean up files older than 4 hours (increased from 2 hours for chunked downloads)"""
     current_time = time.time()
     expired_files = []
     
@@ -117,15 +127,13 @@ def cleanup_old_files():
     except OSError as e:
         print(f"⚠️ Error listing temp directory for cleanup: {e}")
 
-
     for file_id in list(all_known_file_ids): # Iterate over a copy if modifying temp_files
         # Check for filesystem lock first, most robust cross-worker
         lock_file_path = os.path.join(temp_dir_path, f"{file_id}.active_download_lock")
         if os.path.exists(lock_file_path):
-            # Check lock file age, remove stale locks (e.g., older than 15 mins)
             try:
                 lock_age = current_time - os.path.getmtime(lock_file_path)
-                if lock_age > 900: # 15 minutes
+                if lock_age > 3600: # 60 minutes (increased from 30)
                     print(f"🔒 Removing stale lock file for {file_id} (age: {lock_age:.0f}s)")
                     os.unlink(lock_file_path)
                 else:
@@ -135,101 +143,93 @@ def cleanup_old_files():
                 pass # Proceed with other checks
 
         # If not locked, proceed with existing logic (in-memory active_downloads and last_accessed)
-        if file_id in active_downloads: # Check in-memory set for the current worker
+        if file_id in active_downloads:
             print(f"⏳ Skipping cleanup of active download (in-memory): {file_id}")
             continue
 
         file_info = temp_files.get(file_id)
         if not file_info:
-            # If not in memory, try to load metadata to check its age
+            # Try to load from disk metadata
             try:
                 metadata_path = os.path.join(temp_dir_path, f"{file_id}_metadata.json")
                 if os.path.exists(metadata_path):
                     with open(metadata_path, 'r') as f:
-                        disk_file_info = json.load(f)
-                    file_info = disk_file_info # Use this for age check
-                    print(f"📋 Checked disk metadata for cleanup decision for {file_id}")
-                else:
-                    # No metadata, no in-memory entry, and no lock file. If a stray data file exists, it's an orphan.
-                    # This case is implicitly handled by iterating known_file_ids and then trying to delete.
-                    # If only a .data file exists without metadata or lock, it would not be in all_known_file_ids unless temp_files had it.
-                    pass # Fall through to potential deletion if it was in temp_files but now metadata is gone
+                        file_info = json.load(f)
+                        # Convert downloaded_chunks back to set if present
+                        if 'downloaded_chunks' in file_info:
+                            file_info['downloaded_chunks'] = set(file_info['downloaded_chunks'])
+                        else:
+                            file_info['downloaded_chunks'] = set()
             except Exception as e:
-                print(f"⚠️ Error reading metadata for cleanup decision on {file_id}: {e}")
-                # Potentially skip if unsure, or proceed to delete if old
-                # For now, if we can't read its metadata, and it's not locked, assume it might be old if in temp_files
-                if file_id in temp_files: # If it was in memory, use that info
-                  file_info = temp_files.get(file_id)
-                else: # No info at all, can't decide age
-                  continue
+                print(f"⚠️ Error loading metadata for {file_id}: {e}")
+                continue
 
-
-        if file_info: # If we have info either from memory or disk
-            last_access = file_info.get('last_accessed', file_info.get('created', 0))
-            if current_time - last_access > 14400:  # 4 hours since last access
-                expired_files.append(file_id)
+        if file_info:
+            file_age = current_time - file_info.get('created', 0)
+            last_accessed_age = current_time - file_info.get('last_accessed', 0)
+            
+            # Check if all chunks have been downloaded
+            total_chunks = file_info.get('chunks', 0)
+            downloaded_chunks = len(file_info.get('downloaded_chunks', set()))
+            all_chunks_downloaded = downloaded_chunks >= total_chunks
+            
+            print(f"📊 File {file_id} status:")
+            print(f"   - Age: {file_age:.0f}s")
+            print(f"   - Last accessed: {last_accessed_age:.0f}s ago")
+            print(f"   - Chunks downloaded: {downloaded_chunks}/{total_chunks}")
+            
+            # More conservative cleanup timing AND require all chunks downloaded
+            if file_age > 14400: # 4 hours (increased from 2)
+                if last_accessed_age > 7200 and all_chunks_downloaded: # 2 hours since last access AND all chunks downloaded
+                    print(f"🕒 File {file_id} expired and all chunks downloaded")
+                    expired_files.append(file_id)
+                elif all_chunks_downloaded:
+                    print(f"⏳ File {file_id} old but recently accessed (all chunks downloaded)")
+                else:
+                    print(f"⏳ File {file_id} old but chunks still downloading ({downloaded_chunks}/{total_chunks})")
             else:
-                age_hours = (current_time - last_access) / 3600
-                print(f" File {file_id} is not expired. Age: {age_hours:.1f} hours.")
-        elif file_id not in temp_files and not os.path.exists(os.path.join(temp_dir_path, f"{file_id}_metadata.json")):
-            # This file_id came from listdir but has no corresponding metadata or in-memory entry.
-            # It might be a stray .data file or an incomplete upload. Risky to delete without more info.
-            # However, our primary loop is based on all_known_file_ids from metadata and temp_files.
-            # This 'else' branch for file_info might not be hit if file_id was only from listdir and not in temp_files.
-            # Let's refine: if it's in all_known_file_ids it must have had metadata or been in temp_files.
-            # If file_info is None here, it means it was in all_known_file_ids (e.g. from temp_files) but metadata failed to load.
-            # If it's truly old and was in temp_files, it will be added to expired_files.
-             print(f" File {file_id} has no readily available file_info for age check, might be cleaned if it was in temp_files and deemed old.")
-             # If it was in temp_files and its 'created' time is old, it would be caught.
-             # This path is tricky. The main thing is, if it's locked, it's safe.
-             # If not locked, and old by its metadata (or temp_files entry), it gets cleaned.
+                print(f"✅ File {file_id} still valid: age={file_age:.0f}s")
 
+    # Clean up expired files
     for file_id in expired_files:
         try:
             # Double check lock file one last time before deleting
             lock_file_path = os.path.join(temp_dir_path, f"{file_id}.active_download_lock")
             if os.path.exists(lock_file_path):
                 lock_age = current_time - os.path.getmtime(lock_file_path)
-                if lock_age <= 900: # Still fresh lock
+                if lock_age <= 3600: # 60 minutes
                     print(f"🔒 Final check: Skipping delete of {file_id} due to active lock file (age: {lock_age:.0f}s).")
                     continue
                 else:
                     print(f"🔒 Final check: Removing stale lock for {file_id} before deleting data.")
                     os.unlink(lock_file_path)
 
-
-            file_info_to_delete = temp_files.get(file_id)
-            path_to_delete = None
-
-            if file_info_to_delete:
-                path_to_delete = file_info_to_delete.get('path')
-            else:
-                # Try to get path from metadata if not in memory
-                try:
-                    metadata_path_to_delete = os.path.join(temp_dir_path, f"{file_id}_metadata.json")
-                    if os.path.exists(metadata_path_to_delete):
-                        with open(metadata_path_to_delete, 'r') as f:
-                            disk_file_info_to_delete = json.load(f)
-                        path_to_delete = disk_file_info_to_delete.get('path')
-                except Exception as e:
-                    print(f"⚠️ Could not read metadata for path during deletion of {file_id}: {e}")
-            
-            if path_to_delete and os.path.exists(path_to_delete):
-                os.unlink(path_to_delete)
-                print(f"🧹 Cleaned up expired data file: {path_to_delete} for {file_id}")
-            elif path_to_delete:
-                print(f"⚠️ Data file for {file_id} already gone: {path_to_delete}")
-            else:
-                print(f"⚠️ No path found to delete data file for {file_id}")
-
-            if file_id in temp_files:
+            file_info = temp_files.get(file_id)
+            if file_info and 'path' in file_info:
+                # Final check of downloaded chunks
+                total_chunks = file_info.get('chunks', 0)
+                downloaded_chunks = len(file_info.get('downloaded_chunks', set()))
+                if downloaded_chunks < total_chunks:
+                    print(f"⚠️ Skipping deletion of {file_id} - not all chunks downloaded ({downloaded_chunks}/{total_chunks})")
+                    continue
+                    
+                file_path = file_info['path']
+                if os.path.exists(file_path):
+                    os.unlink(file_path)
+                    print(f"🧹 Cleaned up expired file: {file_path}")
                 del temp_files[file_id]
             
-            remove_temp_file_metadata(file_id) # This removes the _metadata.json
-            print(f"🧹 Cleaned up tracking for expired file: {file_id}")
-
+            # Always try to clean up metadata file
+            metadata_path = os.path.join(temp_dir_path, f"{file_id}_metadata.json")
+            if os.path.exists(metadata_path):
+                os.unlink(metadata_path)
+                print(f"🧹 Cleaned up metadata file: {metadata_path}")
+                
         except Exception as e:
-            print(f"❌ Error during cleanup of {file_id}: {e}")
+            print(f"⚠️ Error cleaning up {file_id}: {e}")
+            continue # Continue with other files even if one fails
+
+    return len(expired_files)
 
 def ensure_file_ready(file_path, expected_size, timeout=30):
     """Wait for file to be fully written before marking as ready"""
@@ -750,6 +750,9 @@ def download_chunk(file_id, chunk_index):
     """Download a specific chunk of a processed file"""
     lock_file_path = os.path.join(tempfile.gettempdir(), f"{file_id}.active_download_lock")
     created_lock_this_request = False
+    max_retries = 5  # Increased from 3
+    retry_delay = 2  # Increased from 1 second
+    
     try:
         print(f"📥 Download request: file_id={file_id}, chunk={chunk_index}")
         
@@ -812,9 +815,9 @@ def download_chunk(file_id, chunk_index):
         # Wait for file to be ready if it's not marked as ready yet
         if not file_info.get('ready', False):
             print(f"⏳ File not marked as ready, waiting: {file_id}")
-            # Wait up to 10 seconds for file to be ready
+            # Wait up to 30 seconds for file to be ready (increased from 10)
             wait_time = 0
-            while not file_info.get('ready', False) and wait_time < 10:
+            while not file_info.get('ready', False) and wait_time < 30:
                 time.sleep(0.5)
                 wait_time += 0.5
                 # Refresh file info in case it was updated
@@ -872,72 +875,76 @@ def download_chunk(file_id, chunk_index):
         
         print(f"📦 Reading chunk {chunk_index}: bytes {start_byte}-{end_byte} (expecting {expected_chunk_size} bytes)")
         
-        # Check file size on disk before reading
-        try:
-            actual_file_size = os.path.getsize(file_path)
-            print(f"📏 File size on disk: {actual_file_size} bytes (expected: {file_info['size']})")
-            
-            if actual_file_size != file_info['size']:
-                print(f"⚠️ File size mismatch! Expected {file_info['size']}, got {actual_file_size}")
-                
-        except Exception as size_error:
-            print(f"❌ Could not get file size: {size_error}")
-            # Remove from active downloads
-            active_downloads.discard(file_id)
-            response = jsonify({"error": f"Could not access file: {str(size_error)}"})
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-            return response, 500
+        # Implement retries for file access with exponential backoff
+        last_error = None
+        chunk_data = None
         
-        # Read chunk from file with better error handling
-        try:
-            print(f"🔍 Opening file for reading: {file_path}")
-            with open(file_path, 'rb') as f:
-                print(f"📖 Seeking to position {start_byte}")
-                f.seek(start_byte)
-                print(f"📖 Reading {expected_chunk_size} bytes")
-                chunk_data = f.read(expected_chunk_size)
-                actual_read = len(chunk_data)
-                print(f"📖 Successfully read {actual_read} bytes (expected {expected_chunk_size})")
+        for retry in range(max_retries):
+            try:
+                # Check file size on disk before reading
+                actual_file_size = os.path.getsize(file_path)
+                print(f"📏 File size on disk: {actual_file_size} bytes (expected: {file_info['size']})")
                 
-                if actual_read != expected_chunk_size:
-                    print(f"⚠️ Read size mismatch! Expected {expected_chunk_size}, got {actual_read}")
-                    if actual_read == 0:
-                        raise Exception(f"No data read from file at position {start_byte}")
+                if actual_file_size != file_info['size']:
+                    print(f"⚠️ File size mismatch! Expected {file_info['size']}, got {actual_file_size}")
+                    if retry < max_retries - 1:
+                        wait_time = retry_delay * (2 ** retry)  # Exponential backoff
+                        print(f"🔄 Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                        continue
                 
-        except Exception as read_error:
-            print(f"❌ Error reading file: {str(read_error)}")
-            print(f"❌ Error type: {type(read_error).__name__}")
-            import traceback
-            traceback.print_exc()
-            # Remove from active downloads
-            active_downloads.discard(file_id)
-            response = jsonify({"error": f"Failed to read file: {str(read_error)}"})
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-            return response, 500
+                # Read chunk from file with explicit error handling
+                try:
+                    with open(file_path, 'rb') as f:
+                        f.seek(start_byte)
+                        chunk_data = f.read(expected_chunk_size)
+                        actual_read = len(chunk_data)
+                        
+                        if actual_read == 0:
+                            raise Exception(f"No data read from file at position {start_byte}")
+                        
+                        if actual_read != expected_chunk_size:
+                            print(f"⚠️ Read size mismatch! Expected {expected_chunk_size}, got {actual_read}")
+                            if retry < max_retries - 1:
+                                wait_time = retry_delay * (2 ** retry)  # Exponential backoff
+                                print(f"🔄 Retrying in {wait_time} seconds...")
+                                time.sleep(wait_time)
+                                continue
+                        
+                        # If we got here, the read was successful
+                        print(f"✅ Successfully read {actual_read} bytes on attempt {retry + 1}")
+                        break
+                except IOError as io_error:
+                    print(f"⚠️ IO Error reading file: {io_error}")
+                    if retry < max_retries - 1:
+                        wait_time = retry_delay * (2 ** retry)  # Exponential backoff
+                        print(f"🔄 Retrying in {wait_time} seconds...")
+                        time.sleep(wait_time)
+                        continue
+                    raise
+                    
+            except Exception as e:
+                last_error = e
+                print(f"❌ Error reading file (attempt {retry + 1}): {str(e)}")
+                if retry < max_retries - 1:
+                    wait_time = retry_delay * (2 ** retry)  # Exponential backoff
+                    print(f"🔄 Retrying in {wait_time} seconds...")
+                    time.sleep(wait_time)
+                else:
+                    print("❌ All retries failed")
+                    raise
         
-        # Return chunk as base64 in JSON (small enough for individual responses)
+        if chunk_data is None:
+            raise Exception(f"Failed to read chunk after {max_retries} attempts: {str(last_error)}")
+        
+        # Convert to base64
         try:
-            print(f"🔄 Encoding {len(chunk_data)} bytes to base64")
             chunk_base64 = base64.b64encode(chunk_data).decode('utf-8')
-            base64_length = len(chunk_base64)
-            print(f"✅ Encoded to {base64_length} base64 characters")
+            print(f"✅ Encoded {len(chunk_data)} bytes to {len(chunk_base64)} base64 chars")
             
         except Exception as encode_error:
             print(f"❌ Error encoding chunk: {str(encode_error)}")
-            # Remove from active downloads
-            active_downloads.discard(file_id)
-            response = jsonify({"error": f"Failed to encode chunk: {str(encode_error)}"})
-            response.headers['Access-Control-Allow-Origin'] = '*'
-            response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-            response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
-            return response, 500
-        
-        print(f"📦 Successfully serving chunk {chunk_index}/{file_info['chunks']} for {file_id}")
-        print(f"📊 Chunk stats: {len(chunk_data)} bytes, base64: {len(chunk_base64)} chars")
+            raise
         
         response_data = {
             "chunk_index": chunk_index,
@@ -954,7 +961,7 @@ def download_chunk(file_id, chunk_index):
         
         # Only remove from active downloads if this was the last chunk
         if chunk_index == file_info['chunks'] - 1:
-            print(f"📋 Last chunk for {file_id}, removing from active downloads (in-memory) and lock file.")
+            print(f"📋 Last chunk for {file_id}, removing from active downloads")
             active_downloads.discard(file_id)
             if os.path.exists(lock_file_path):
                 try:
@@ -963,6 +970,19 @@ def download_chunk(file_id, chunk_index):
                 except OSError as e:
                     print(f"⚠️ Error removing lock file {lock_file_path} on completion: {e}")
         
+        # After successful chunk read and before returning response
+        if file_id in temp_files:
+            # Track this chunk as downloaded
+            if 'downloaded_chunks' not in temp_files[file_id]:
+                temp_files[file_id]['downloaded_chunks'] = set()
+            temp_files[file_id]['downloaded_chunks'].add(chunk_index)
+            
+            # Save updated metadata
+            save_temp_file_metadata(file_id, temp_files[file_id])
+            
+            print(f"✅ Marked chunk {chunk_index} as downloaded for {file_id}")
+            print(f"📊 Downloaded chunks: {len(temp_files[file_id]['downloaded_chunks'])}/{file_info['chunks']}")
+        
         return response
         
     except Exception as e:
@@ -970,20 +990,18 @@ def download_chunk(file_id, chunk_index):
         print(f"❌ Error type: {type(e).__name__}")
         import traceback
         traceback.print_exc()
+        
         # Always remove from active downloads on error for this worker
         active_downloads.discard(file_id)
-        # Attempt to remove lock file on error too, as this download attempt for this chunk failed.
-        # Only if this request created it, or if it's an unrecoverable error for the file_id.
-        # For now, let's be cautious: only remove if last chunk or truly fatal error for file_id.
-        # The stale lock cleanup in `cleanup_old_files` will handle abandoned locks.
-        # However, if it's a "File not found" type error, the lock is for a non-existent file.
-        if isinstance(e, FileNotFoundError) or "File not found" in str(e) or "No metadata found" in str(e):
+        
+        # Clean up lock file if appropriate
+        if created_lock_this_request or isinstance(e, FileNotFoundError) or "File not found" in str(e):
             if os.path.exists(lock_file_path):
                 try:
                     os.unlink(lock_file_path)
-                    print(f"🔒 Removed lock file due to file not found error: {lock_file_path}")
+                    print(f"🔒 Removed lock file due to error: {lock_file_path}")
                 except OSError as unlink_e:
-                    print(f"⚠️ Error removing lock file {lock_file_path} on file not found error: {unlink_e}")
+                    print(f"⚠️ Error removing lock file {lock_file_path}: {unlink_e}")
 
         response = jsonify({"error": f"Failed to serve chunk: {str(e)}"})
         response.headers['Access-Control-Allow-Origin'] = '*'

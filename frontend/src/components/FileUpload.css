@@ -138,6 +138,117 @@
     margin: 10px 0;
 }
 
+/* New styles from FileUpload.js */
+@keyframes spin { 
+    100% { transform: rotate(360deg); } 
+}
+
+@keyframes pulse { 
+    0%, 100% { opacity: 1; } 
+    50% { opacity: 0.5; } 
+}
+
+.upload-area:hover { 
+    border-color: #3b82f6; 
+    background-color: #f0f9ff; 
+}
+
+.upload-button:disabled { 
+    opacity: 0.6; 
+    cursor: not-allowed; 
+}
+
+.image-card:hover { 
+    transform: translateY(-2px); 
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); 
+}
+
+.download-button:hover { 
+    background-color: #047857; 
+    transform: translateY(-1px); 
+}
+
+.bulk-button:hover { 
+    background-color: #047857; 
+    transform: translateY(-1px); 
+}
+
+.clear-button:hover { 
+    background-color: #b91c1c; 
+    transform: translateY(-1px); 
+}
+
+.media:hover { 
+    transform: scale(1.02); 
+}
+
+.extract-button:hover:not(:disabled) { 
+    background-color: #6d28d9; 
+    transform: translateY(-1px); 
+    box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2); 
+}
+
+.toggle-button:hover { 
+    background-color: #4f46e5; 
+    transform: translateY(-1px); 
+}
+
+.camera-button:hover:not(:disabled) { 
+    background-color: #0284c7; 
+    transform: translateY(-1px); 
+    box-shadow: 0 4px 12px rgba(14, 165, 233, 0.3); 
+}
+
+.record-button:hover:not(:disabled) { 
+    background-color: #b91c1c; 
+    transform: translateY(-1px); 
+    box-shadow: 0 4px 12px rgba(220, 38, 38, 0.3); 
+}
+
+.camera-button:disabled, 
+.record-button:disabled { 
+    opacity: 0.6; 
+    cursor: not-allowed; 
+    transform: none; 
+    box-shadow: none; 
+}
+
+input[type="range"]::-webkit-slider-thumb { 
+    -webkit-appearance: none; 
+    appearance: none; 
+    height: 20px; 
+    width: 20px; 
+    border-radius: 50%; 
+    background: #7c3aed; 
+    cursor: pointer; 
+    border: 2px solid #ffffff; 
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); 
+    margin-top: -7px; 
+}
+
+input[type="range"]::-moz-range-thumb { 
+    height: 20px; 
+    width: 20px; 
+    border-radius: 50%; 
+    background: #7c3aed; 
+    cursor: pointer; 
+    border: 2px solid #ffffff; 
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2); 
+}
+
+input[type="range"]::-webkit-slider-runnable-track { 
+    background: #e2e8f0; 
+    height: 6px; 
+    border-radius: 3px; 
+}
+
+input[type="range"]::-moz-range-track { 
+    background: #e2e8f0; 
+    height: 6px; 
+    border-radius: 3px; 
+    border: none; 
+}
+
 @media (max-width: 768px) {
     .media-container {
         grid-template-columns: 1fr;
